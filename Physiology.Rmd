@@ -1,0 +1,879 @@
+---
+title: "Reef-scale environmental mosaics shape coral physiological and microbial signatures
+  of resilience"
+author: "Marcelina Martynek"
+date: "2026-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("ggplot2")
+library("tidyverse")
+library('csv')
+library('mgcv')
+library('patchwork')
+library('gridExtra')
+library('cowplot')
+library('emmeans')
+library('reshape2')
+library('ggrepel')
+library('ggfortify') 
+library('Rmisc')
+library(beeswarm)
+library(dplyr)
+library(lubridate)
+library(grid)
+library(vegan)
+library(pairwiseAdonis)
+
+phys<-read.csv("Pdam comparative physiology CURRENT.csv", strip.white=T)
+phys$Origin<-as.factor(phys$Origin)
+phys$Coral.ID<-as.factor(phys$Coral.ID)
+phys$mean.daily.amp<-as.numeric(phys$mean.daily.amp)
+phys
+
+
+site_colors_ID <- c(
+  "RF" = "violetred",  
+  "RC" = "#C1000e",  
+  "SL" = "brown1", 
+  "DL" = "steelblue1", 
+  "FP" = "dodgerblue2", 
+  "HB" = "#131142FF")
+```
+
+#Physiology - all 
+#Protein
+###Normality
+```{r}
+hist(phys$Protein)
+```
+
+```{r}
+protein.lm<- lm(Protein~Origin, data=phys) #Gaussian
+par(mfrow=c(2,3))
+plot(protein.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+protein.lme <- lme(Protein~Origin, random = ~1|Coral.ID, data=phys, na.action=na.exclude)
+car::Anova(protein.lme, type=2)
+tukey<- emmeans(protein.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_prot <- summarySE(
+  data = phys,
+  measurevar = "Protein",
+  groupvars = c("Origin")
+)
+
+phys_sum_prot$Origin <- factor(phys_sum_prot$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+prot_line_plot <- ggplot(phys_sum_prot, aes(x = Origin, y = Protein)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +  
+  geom_point(aes(color = Origin), size = 5) +              
+  geom_errorbar(aes(ymin = Protein - se, ymax = Protein + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression("       Host-soluble\nprotein content"~(mg~'\U2219'~cm^{-2})), limits = c(0, 1.5)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black')
+  )
+
+prot_line_plot
+
+```
+
+#Symbiont density
+###Normality
+```{r}
+hist(phys$Sym.density)
+hist(phys$Regate)
+```
+
+```{r}
+sym.lm<- lm(Regate~Origin, data=phys) #Gaussian
+par(mfrow=c(2,3))
+plot(sym.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+sym.lme <- lme(Regate~Origin, random = ~1|Coral.ID, data=phys, na.action=na.exclude)
+car::Anova(sym.lme, type=2)
+tukey<- emmeans(sym.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_sym <- summarySE(
+  data = phys,
+  measurevar = "Regate",
+  groupvars = c("Origin"), 
+  na.rm = TRUE)
+
+
+phys_sum_sym$Origin <- factor(phys_sum_sym$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+sym_line_plot <- ggplot(phys_sum_sym, aes(x = Origin, y = Regate)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +  
+  geom_point(aes(color = Origin), size = 5) +         
+  geom_errorbar(aes(ymin = Regate - se, ymax = Regate + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression(Symbiont~density~(10^{6}~cells~'\U2219'~cm^{-2})), limits = c(0, 0.8)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black')
+  )
+
+sym_line_plot
+```
+
+#CaCO3 density
+###Normality
+```{r}
+hist(phys$CaCO3.Density..g.ml.)
+```
+
+```{r}
+density.lm<- lm(CaCO3.Density..g.ml.~Origin, data=phys) #Gaussian
+par(mfrow=c(2,3))
+plot(density.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+density.lme <- lme(CaCO3.Density..g.ml.~Origin, random = ~1|Coral.ID, data=phys, na.action=na.exclude)
+car::Anova(density.lme, type=2)
+tukey<- emmeans(density.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+#Figure
+```{r}
+phys_sum_den <- summarySE(
+  data = phys,
+  measurevar = "CaCO3.Density..g.ml.",
+  groupvars = c("Origin"), 
+  na.rm = TRUE)
+
+phys_sum_den$Origin <- factor(phys_sum_den$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+den_line_plot <- ggplot(phys_sum_den, aes(x = Origin, y = CaCO3.Density..g.ml.)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") + 
+  geom_point(aes(color = Origin), size = 5) +            
+  geom_errorbar(aes(ymin = CaCO3.Density..g.ml. - se, ymax = CaCO3.Density..g.ml. + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression(CaCO[3]~density~(g~'\U2219'~mL^{-1})), limits = c(1, 3), breaks = seq(1, 3, by = 1)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black'))
+
+den_line_plot
+```
+
+#Chlorophyll
+###Normality
+```{r}
+hist(phys$Chlor)
+```
+
+```{r}
+chlor.lm<- lm(Chlor~Origin, data=phys) #Gaussian
+par(mfrow=c(2,3))
+plot(chlor.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+chlor.lme <- lme(Chlor~Origin, random = ~1|Coral.ID, data=phys, na.action=na.exclude)
+car::Anova(chlor.lme, type=2)
+tukey<- emmeans(chlor.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_chlor <- summarySE(
+  data = phys,
+  measurevar = "Chlor",
+  groupvars = c("Origin"), 
+  na.rm = TRUE
+)
+
+phys_sum_chlor$Origin <- factor(phys_sum_chlor$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+chlor_line_plot <- ggplot(phys_sum_chlor, aes(x = Origin, y = Chlor)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +
+  geom_point(aes(color = Origin), size = 5) +           
+  geom_errorbar(aes(ymin = Chlor - se, ymax = Chlor + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression(Chlorophyll~a~(mu~g~'\U2219'~cm^{-2})), limits = c(0, 3), breaks = seq(0, 3, by = .5)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black')
+  )
+
+chlor_line_plot
+
+```
+
+#AFDW
+###Normality
+```{r}
+hist(phys$AFDW..mg.cm.2.)
+
+
+#removing one outlier 
+phys_withoutAFDWoutlier <- phys
+
+phys_withoutAFDWoutlier[57, 11] <- NA  #SL07
+
+```
+
+```{r}
+AFDW.lm<- lm(AFDW..mg.cm.2.~Origin, data=phys_withoutAFDWoutlier) #Gaussian
+par(mfrow=c(2,3))
+plot(AFDW.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+AFDW.lme <- lme(AFDW..mg.cm.2.~Origin, random = ~1|Coral.ID, data=phys_withoutAFDWoutlier, na.action=na.exclude)
+car::Anova(AFDW.lme, type=2)
+tukey<- emmeans(AFDW.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_AFDW <- summarySE(
+  data = phys_withoutAFDWoutlier,
+  measurevar = "AFDW..mg.cm.2.",
+  groupvars = c("Origin"), 
+  na.rm = TRUE
+)
+
+phys_sum_AFDW$Origin <- factor(phys_sum_AFDW$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+AFDW_line_plot <- ggplot(phys_sum_AFDW, aes(x = Origin, y = AFDW..mg.cm.2.)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +  
+  geom_point(aes(color = Origin), size = 5) +             
+  geom_errorbar(aes(ymin = AFDW..mg.cm.2. - se, ymax = AFDW..mg.cm.2. + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression(Total~biomass~(mg~'\U2219'~cm^{-2})), limits = c(0, 2.5)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black'))
+
+AFDW_line_plot
+
+```
+#MMAs
+#Removing outliers in MAAs 
+```{r}
+
+#Testing showed that Sample SL07 is way off the charts
+phys_withoutMAAoutliers <- phys
+
+phys_withoutMAAoutliers[57, 3] <- NA  # Mycrosporine..glycine
+phys_withoutMAAoutliers[57, 4] <- NA  # Palythine
+phys_withoutMAAoutliers[57, 5] <- NA  # Asterina
+phys_withoutMAAoutliers[57, 6] <- NA  # Shinorine
+
+# Check for NA values in the specific locations
+phys_withoutMAAoutliers[57, c(3, 4, 5, 6)]
+
+##after removing SL07, RC04 proved to be an outlier as well. Removing 
+phys_withoutMAAoutliers[34, 3] <- NA  # Mycrosporine..glycine
+phys_withoutMAAoutliers[34, 4] <- NA  # Palythine
+phys_withoutMAAoutliers[34, 5] <- NA  # Asterina
+phys_withoutMAAoutliers[34, 6] <- NA  # Shinorine
+
+##after removing RC04, FP10 proved to be an outlier as well. Removing 
+phys_withoutMAAoutliers[20, 3] <- NA  # Mycrosporine..glycine
+phys_withoutMAAoutliers[20, 4] <- NA  # Palythine
+phys_withoutMAAoutliers[20, 5] <- NA  # Asterina
+phys_withoutMAAoutliers[20, 6] <- NA  # Shinorine
+
+```
+
+#Mycrosporine glycine
+###Normality
+```{r}
+hist(phys_withoutMAAoutliers$Mycrosporine..glycine)
+```
+
+```{r}
+maa1.lm<- lm(Mycrosporine..glycine~Origin, data=phys_withoutMAAoutliers) #Gaussian
+par(mfrow=c(2,3))
+plot(maa1.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+maa1.lme <- lme(Mycrosporine..glycine~Origin, random = ~1|Coral.ID, data=phys_withoutMAAoutliers, na.action=na.exclude)
+car::Anova(maa1.lme, type=2)
+tukey<- emmeans(maa1.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+#Palythine
+###Normality
+```{r}
+hist(phys$Palythine)
+```
+
+```{r}
+pal.lm<- lm(Palythine~Origin, data=phys_withoutMAAoutliers) #Gaussian
+par(mfrow=c(2,3))
+plot(pal.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+pal.lme <- lme(Palythine~Origin, random = ~1|Coral.ID, data=phys_withoutMAAoutliers, na.action=na.exclude)
+car::Anova(pal.lme, type=2)
+tukey<- emmeans(pal.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+#Asterina
+###Normality
+```{r}
+hist(phys$Asterina)
+```
+
+```{r}
+ast.lm<- lm(Asterina~Origin, data=phys_withoutMAAoutliers) #Gaussian
+par(mfrow=c(2,3))
+plot(ast.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+ast.lme <- lme(Asterina~Origin, random = ~1|Coral.ID, data=phys_withoutMAAoutliers, na.action=na.exclude)
+car::Anova(ast.lme, type=2)
+tukey<- emmeans(ast.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+#Shinorine
+###Normality
+```{r}
+hist(phys$Shinorine)
+```
+
+```{r}
+shin.lm<- lm(Shinorine~Origin, data=phys_withoutMAAoutliers) #Gaussian
+par(mfrow=c(2,3))
+plot(shin.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+shin.lme <- lme(Shinorine~Origin, random = ~1|Coral.ID, data=phys_withoutMAAoutliers, na.action=na.exclude)
+car::Anova(shin.lme, type=2)
+tukey<- emmeans(shin.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+
+#All MMA Plot 
+```{r}
+phys_long_MAA <- phys_withoutMAAoutliers %>%
+  pivot_longer(
+    cols = c(Mycrosporine..glycine, Shinorine, Palythine, Asterina),
+    names_to = "MAA_type",
+    values_to = "MAA_conc"
+  )
+
+phys_sum_MAA <- summarySE(
+  data = phys_long_MAA,
+  measurevar = "MAA_conc",
+  groupvars = c("Origin", "MAA_type"),
+  na.rm = TRUE
+)
+```
+
+```{r}
+
+phys_sum_MAA$Origin <- factor(phys_sum_MAA$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+dodge <- position_dodge(width = 0.5)
+
+MAA_line_plot <- ggplot(phys_sum_MAA, aes(x = Origin, y = MAA_conc, group = MAA_type)) +
+  geom_point(aes(color = Origin, shape = MAA_type), 
+             size = 5, position = dodge) +
+  geom_errorbar(aes(ymin = MAA_conc - se, ymax = MAA_conc + se, color = Origin), 
+                width = 0.2, position = dodge) +
+  scale_y_continuous(expression(MAA~concentration~(m~g~'\U2219'~cm^{-2})), limits = c(0, 12.5), breaks = seq(0, 12.5, by = 2.5)) +
+  scale_color_manual(values = site_colors_ID) +
+  scale_shape_manual(
+    values = c(16, 17, 15, 18),
+    name = "MAA Type",
+    labels = c("Mycosporine-glycine", "Shinorine", "Palythine", "Asterina")
+  ) +
+  guides(color = "none") +
+  theme_classic() +
+theme(
+  legend.position = "none",
+  panel.background = element_rect(fill = NA, color = 'black'), 
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16)
+)
+
+MAA_line_plot
+
+```
+
+#Pocilloporin
+###Normality
+```{r}
+hist(phys$Pocilloporin)
+
+#One outlier --> 34 (RC04) 
+phys_withoutPOCoutliers <- phys
+
+phys_withoutPOCoutliers[34, 7] <- NA  # Pocilloporin
+
+# Check for NA values in the specific locations
+phys_withoutPOCoutliers[34, 7]
+
+#After removing the first outlier, SL07 & FP10 proved to be an outlier as well. Removing
+phys_withoutPOCoutliers[57, 7] <- NA
+phys_withoutPOCoutliers[20, 7] <- NA
+
+
+```
+
+```{r}
+poc.lm<- lm(Pocilloporin~Origin, data=phys_withoutPOCoutliers) #Gaussian
+par(mfrow=c(2,3))
+plot(poc.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+poc.lme <- lme(Pocilloporin~Origin, random = ~1|Coral.ID, data=phys_withoutPOCoutliers, na.action=na.exclude)
+car::Anova(poc.lme, type=2)
+tukey<- emmeans(poc.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_poc <- summarySE(
+  data = phys_withoutPOCoutliers,
+  measurevar = "Pocilloporin",
+  groupvars = c("Origin"), 
+  na.rm = TRUE
+)
+
+
+phys_sum_poc$Origin <- factor(phys_sum_poc$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+poc_line_plot <- ggplot(phys_sum_poc, aes(x = Origin, y = Pocilloporin)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +  
+  geom_point(aes(color = Origin), size = 5) +           
+  geom_errorbar(aes(ymin = Pocilloporin - se, ymax = Pocilloporin + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression(Pocilloporin~(m~g~'\U2219'~cm^{-2})), limits =c(0, 3)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black')
+  )
+
+poc_line_plot
+
+```
+#ED50
+###Stats
+```{r}
+phys_sum_ED50 <- data.frame(
+  Origin = c("HB", "FP", "DL", "SL", "RC", "RF"),
+  ED50 = c(35.371, 35.099, 36.067, 36.810, 35.888, 36.080),
+  se = c(0.224, 0.238, 0.474, 0.928, 0.520, 0.459))
+
+```
+###Figure
+```{r}
+phys_sum_ED50$Origin <- factor(phys_sum_ED50$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+ED50_line_plot <- ggplot(phys_sum_ED50, aes(x = Origin, y = ED50)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") + 
+  geom_point(aes(color = Origin), size = 5) +            
+  geom_errorbar(aes(ymin = ED50 - se, ymax = ED50 + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression("Thermal tolerance (ED50)"), breaks = seq(34, 39, by = 0.5)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black')
+  )
+
+ED50_line_plot
+```
+
+#Fv/Fm
+```{r}
+hist(phys$FvFm)
+```
+###Normality
+```{r}
+fvfm.lm<- lm(FvFm~Origin, data=phys) #Gaussian
+par(mfrow=c(2,3))
+plot(fvfm.lm, ask=FALSE, which=1:6)
+```
+###Stats
+```{r}
+fvfm.lme <- lme(FvFm~Origin, random = ~1|Coral.ID, data=phys, na.action=na.exclude)
+car::Anova(fvfm.lme, type=2)
+tukey<- emmeans(fvfm.lme, list(pairwise ~ Origin), adjust = "tukey")
+tukey
+```
+###Figure
+```{r}
+phys_sum_FvFm <- summarySE(
+  data = phys,
+  measurevar = "FvFm",
+  groupvars = c("Origin"), 
+  na.rm = TRUE)
+
+phys_sum_FvFm$Origin <- factor(phys_sum_FvFm$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+FvFm_line_plot <- ggplot(phys_sum_FvFm, aes(x = Origin, y = FvFm)) +
+  #geom_line(aes(group = 1), size = 1, color = "gray40") +  
+  geom_point(aes(color = Origin), size = 5) +             
+  geom_errorbar(aes(ymin = FvFm - se, ymax = FvFm + se, color = Origin), width = 0.2) +
+  scale_y_continuous(expression("Photochemical yield (Fv/Fm)"), limits = c(0.5, 0.7)) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none",
+    panel.background = element_rect(fill = NA, color = 'black'))
+
+FvFm_line_plot
+
+```
+
+#SUPP FIG 2 - PHYSIOLOGY 
+```{r}
+legend_plot <- ggplot(phys_sum_prot, aes(x = Origin, y = Protein, color = Origin)) + #get common legend 
+  geom_point() +
+  scale_color_manual(values = site_colors_ID) +
+  theme_void() +
+  theme(
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 9),               
+    legend.key.width = unit(1.0, "cm"),                 
+    legend.key.height = unit(0.4, "cm"),
+    legend.spacing.x = unit(0.3, 'cm'))
+
+legend <- get_legend(legend_plot)
+
+main_grid <- (
+  prot_line_plot + AFDW_line_plot + den_line_plot +
+  sym_line_plot + chlor_line_plot + FvFm_line_plot +
+  MAA_line_plot + poc_line_plot + ED50_line_plot) +
+  plot_layout(ncol = 3) +
+  plot_annotation(tag_levels = 'A') &
+    theme(plot.tag = element_text(face = 'bold', size =16))
+
+combined_plot_phys <- plot_grid(
+  #legend,
+  main_grid,
+  ncol = 1,
+  rel_heights = c(0.1, 1))
+
+
+combined_plot_phys
+```
+
+#Multivariate Physiology - PCA
+```{r}
+colnames(phys)
+```
+
+```{r}
+
+#sum(is.na(phys[,(3:13)]))  # Count NA values in the selected columns
+phys_clean <- phys[-c(34, 57, 20),] # Remove rows 34, 57, 20 (outliers) SL07, RC04, FP10
+
+phys.rda<- rda(phys_clean[, c(3:8, 10:13, 24:25)], na.rm=TRUE, scale=TRUE)
+```
+
+```{r}
+biplot(phys.rda, scaling=1, main='Scaling')
+```
+
+```{r}
+pca.sites.scores<- as.data.frame(scores(phys.rda, display='sites'))
+pca.sites.scores<- data.frame(pca.sites.scores, phys_clean)
+pca.species.scores<- as.data.frame(scores(phys.rda, display='species'))
+pca.species.scores$Species<- rownames(pca.species.scores)
+pca.species.scores
+```
+```{r}
+include_list<- c("Mycrosporine..glycine", "Asterina", "Shinorine", "Palythine", "Pocilloporin", "CaCO3.Density..g.ml.", "Protein", "AFDW..mg.cm.2.", "Sym.density", "Chlor", "ED50", "FvFm") #List of vectors to inclue on the below plot
+pca.species.scores<-pca.species.scores[include_list,]
+```
+
+```{r} 
+eig<-eigenvals(phys.rda)
+eig
+```
+
+
+###stats - PCA 
+```{r}
+
+phys.adonis<-adonis2(phys_clean[, c(3:8, 10:13, 24:25)] ~Origin, data=phys_clean, permutations = 9999, na.rm=T)
+phys.adonis
+
+
+pairwise_phys <- pairwise.adonis2(phys_clean[, c(3:8, 10:13, 24:25)] ~Origin, data=phys_clean, permutations = 9999, na.rm=T)
+
+pair_tab <- as.data.frame(pairwise_phys$pairs)  
+pair_tab
+
+```
+
+###collapse MAAs 
+```{r}
+
+pca.sites.scores$Origin <- factor(pca.sites.scores$Origin, levels = c("RF", "RC", "SL", "DL", "FP", "HB"))
+
+pca.variables <- pca.species.scores[1:12, ]  # force 12 rows
+
+pca.variables$Species <- c(
+  "Mycosporine glycine", "Asterina", "Shinorine", "Palythine", 
+  "Pocilloporin", "Skeletal density", "Host protein", 
+  "Total biomass", "Symbiont density", "Chlorophyll-a", 
+  "ED50", "Fv/Fm")
+
+MAA_group <- pca.variables %>%
+  filter(Species %in% c("Mycosporine glycine", "Asterina", "Shinorine", "Palythine")) %>%
+  dplyr::summarize(
+    PC1 = mean(PC1),
+    PC2 = mean(PC2),
+    Species = "MMAs",
+    .groups = "drop")
+
+non_MAA_group <- pca.variables %>%
+  filter(!Species %in% c("Mycosporine glycine", "Asterina", "Shinorine", "Palythine"))
+
+pca.variables <- bind_rows(MAA_group, non_MAA_group) %>%
+  mutate(
+      label = case_when(
+      Species == "Fv/Fm" ~ "F[v]/F[m]",
+      TRUE ~ paste0("'", Species, "'")))
+```
+###plot PCA
+```{r}
+
+g <- ggplot() +
+  geom_point(data = pca.sites.scores, aes(x = PC1, y = PC2, color = Origin), size = 5, alpha = 0.8) +
+  stat_ellipse(data = pca.sites.scores, aes(x = PC1, y = PC2, group = Origin, color = Origin), 
+               type = "norm", level = 0.5, size = 1, linetype = "solid") +
+  geom_hline(yintercept = 0, linetype = 2, alpha = 0.8, color = "darkgray") + 
+  geom_vline(xintercept = 0, linetype = 2, alpha = 0.8, color = "darkgray") +
+  geom_segment(data = pca.variables, aes(x = 0, y = 0, xend = PC1 *1.5, yend = PC2 *1.5), 
+               arrow = arrow(length = unit(.3, 'lines')), 
+               color = 'black', linetype = 'solid', alpha = 0.9) +
+  geom_text_repel(data = pca.variables, aes(x = PC1 *1.6, y = PC2 *1.6, label = label), color = "black", parse = TRUE, size = 8, 
+  nudge_x = 0, nudge_y = 0) +
+  scale_color_manual(name = "Site",values = site_colors_ID) +
+  scale_x_continuous(limits = c(-1.5, 2.5),
+    paste0(names(eig[1]), sprintf(' (%0.1f%% explained var.)', 100 * eig[1] / sum(eig)))) +
+  scale_y_continuous(
+    limits = c(-1.5, 2.5),
+    paste0(names(eig[2]), sprintf(' (%0.1f%% explained var.)', 100 * eig[2] / sum(eig)))) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(size = 18),
+    axis.text.y = element_text(size = 18),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    legend.position = c(0.98, 0.98),
+  legend.justification = c(1, 1),
+  legend.title = element_text(size = 18, face = "bold"),
+  legend.text = element_text(size = 16),
+  legend.key.size = unit(0.8, "cm"),
+    panel.background = element_rect(fill = NA, color = 'black'),
+    strip.text = element_text(size = 12, face = "italic")) 
+
+g
+```
+
+###distance to centroid: Phys PCA
+```{r}
+pca.sites.scores <- as.data.frame(scores(phys.rda, display = "sites", choices = 1:12))
+pca.sites.scores$Origin <- phys_clean$Origin
+pca.sites.scores$Origin <- factor(pca.sites.scores$Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF"))
+
+
+centroids <- pca.sites.scores %>%
+  group_by(Origin) %>%
+  dplyr::summarize(across(PC1:PC12, mean, na.rm = TRUE), .groups = "drop")
+
+dist_pca <- pca.sites.scores %>%
+  left_join(centroids, by = "Origin", suffix = c("", "_centroid")) %>%
+  rowwise() %>%
+  dplyr::mutate(dist_to_centroid = sqrt(sum((c_across(PC1:PC12) - c_across(PC1_centroid:PC12_centroid))^2))) %>%
+  ungroup()
+
+
+anova_model <- lm(dist_to_centroid ~ Origin, data = dist_pca)
+car::Anova(anova_model, type = 2)
+
+
+tukey_dist_phys<- emmeans(anova_model, list(pairwise ~ Origin), adjust = "tukey")
+tukey_dist_phys
+
+```
+
+```{r}
+
+phys_dist <- ggplot(dist_pca, aes(x = Origin, y = dist_to_centroid, fill = Origin)) +
+  geom_boxplot(width = .5, outlier.shape = NA, alpha = 0.8, size = 1) +
+    geom_jitter(width = 0.15, size = 4, alpha = 0.8, 
+    shape = 21,stroke = 0.7) +
+  scale_fill_manual(values = site_colors_ID) +
+  scale_x_discrete(labels = c(
+    "Harry's Bommie" = "HB",
+    "Fourth Point" = "FP",
+    "Deep Lagoon" = "DL",
+    "Shallow Lagoon" = "SL",
+    "Reef Crest" = "RC",
+    "Reef Flat" = "RF")) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.title.x = element_blank(),
+    panel.background = element_rect(fill = NA, color = "black"),
+    legend.position = "none", legend.text = element_text(size = 16),
+legend.title = element_text(size = 18)) + labs(y = "Distance to centroid")
+
+phys_dist
+
+# To assess within-site variability, we analyzed the dispersion of individuals in multivariate space. Significant differences in multivariate dispersion by site was observed (F=4.07, p=0.004), with SL exhibiting the greatest spread, indicating greater physiological heterogeneity within this site. Pairwise comparisons confirmed that SL was significantly more dispersed than FP, DL, HB, and RF (p<0.037). Differences in dispersion between other sites were not statistically significant (p>0.58).
+```
+
+##Inset PCA - environmental parameters
+```{r}
+
+env_vars <- c(
+  "mean_o2",
+  "mean_salinity",
+  "mean_turbidity",
+  "mean_depth",
+  "mean.seasonal.amp",
+  "mean.daily.amp",
+  "DLI",
+  "Fluor",
+  "O2_amp")
+
+env_fit_df <- phys_clean %>%
+  dplyr::filter(Origin != "RC") %>%
+  dplyr::select(Origin, Coral.ID, all_of(env_vars))
+
+
+phys_scores_all <- as.data.frame(scores(phys.rda, display = "sites", scaling = 1))
+phys_scores_all <- data.frame(phys_scores_all, phys_clean)
+
+phys_scores_envfit <- phys_scores_all %>%
+  dplyr::filter(Origin != "RC")
+
+fit_env <- envfit(
+  phys_scores_envfit[, c("PC1", "PC2")],
+  env_fit_df[, env_vars],
+  permutations = 999)
+
+fit_env
+
+env_scores <- as.data.frame(scores(fit_env, display = "vectors"))
+env_scores$var  <- rownames(env_scores)
+env_scores$pval <- fit_env$vectors$pvals
+env_scores$r    <- fit_env$vectors$r
+
+colnames(env_scores)[1:2] <- c("PC1", "PC2")
+
+```
+
+```{r}
+env_scores$label <- dplyr::recode(env_scores$var,
+  mean_o2 = "DO",
+  mean_salinity = "Salinity",
+  mean_turbidity = "Turbidity",
+  mean_depth = "Depth",
+  mean.seasonal.amp = "Mean~seasonal~amp.",
+  mean.daily.amp = "Mean~daily~amp.",
+  DLI = "PAR~daily~dose", 
+  Fluor = "Fluor.", 
+  O2_amp = "DO~amp.")
+
+env_inset <- ggplot() +
+  geom_hline(yintercept = 0, linetype = 2, alpha = 0.5, color = "gray50") +
+  geom_vline(xintercept = 0, linetype = 2, alpha = 0.5, color = "gray50") +
+  geom_segment(
+    data = env_scores,
+    aes(x = 0, y = 0, xend = PC1 * 1.4, yend = PC2 * 1.4),
+    arrow = arrow(length = unit(0.2, "lines")),
+    color = "black", alpha = 0.9) +
+  geom_text_repel(data = env_scores,aes(x = PC1 * 1.4, y = PC2 * 1.4, label = label),size = 5,color = "black",box.padding = 0.25,point.padding = 0.15,force = 5,force_pull = 0.2,max.overlaps = Inf,min.segment.length = 0,segment.size = 0.2,seed = 123, parse = TRUE ) +
+  scale_color_manual(values = site_colors_ID) +
+  theme_classic() +
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = "black"),
+    panel.border = element_rect(color = "black", fill = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+    legend.position = "none")
+
+env_inset
+
+```
+
+#FIGURE 3
+```{r}
+g <- g +coord_cartesian(xlim = c(-1.5, 2.5), ylim = c(-1.5, 2.5), clip = "off")
+
+physfinal_pca <- g +
+  annotation_custom(
+    grob = ggplotGrob(env_inset),
+    xmin = -1.71,
+    xmax = -0.2,
+    ymin = 1.2,
+    ymax = 2.70)
+
+physfinal_pca
+```
