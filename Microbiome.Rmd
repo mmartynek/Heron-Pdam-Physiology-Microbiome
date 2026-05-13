@@ -1,0 +1,2190 @@
+---
+title: "Reef-scale environmental mosaics shape coral physiological and microbial signatures
+  of resilience"
+author: "Marcelina Martynek"
+date: "2026-05-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+***Initial sequence processing in DADA2 was performed on a larger dataset that included the September 2022 samples analyzed in this manuscript together with additional samples not considered further here. Downstream analyses for this study were then conducted using only the September 2022 samples.***
+
+
+#working nonsense
+```{r}
+library(dada2); packageVersion("dada2") # 1.16 or later
+library(ggplot2)
+library(ShortRead)
+library(Biostrings)
+library(stringr)
+library(readr)
+library(dplyr)
+library(phyloseq)
+library(decontam)
+library(microbiome)
+library(ggpubr)
+library(multcompView)
+library(DECIPHER)
+library(phangorn)
+library(ape)
+library(vegan)
+library(Rmisc)
+library(tidyverse)
+library(RColorBrewer)
+library(patchwork)
+library(pairwiseAdonis)
+#library(MicEco)
+library(DESeq2)
+library(RColorBrewer)
+library(Hmisc)
+
+```
+
+```{r}
+ps <- readRDS("ps_tree.rds")
+
+# Optional sanity check — will throw error if tree is missing
+phy_tree(ps)
+
+DNA_concentration<-read.csv("Barott Coral Extractions - Marcelina - Sheet1.csv", strip.white=T)
+DNA_concentration$Origin<-as.factor(DNA_concentration$Origin)
+DNA_concentration$SampleID<-as.factor(DNA_concentration$SampleID)
+
+path <- "C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/demultiplexed_fastq"
+list.files(path, all.files = TRUE)
+
+```
+
+#Pre-sequencing: DNA concentration visualization
+```{r}
+DNA_concentration$Origin<- factor(DNA_concentration$Origin, levels =c("RF","RC","SL","DL", "FP", "HB", "Control")) 
+
+DNA_concentration$study_group <- factor(DNA_concentration$study_group, 
+                                         levels = c("Sept_2022", "May_2024", "Sept_2024"))
+concentration_plot <- ggplot(DNA_concentration, aes(x = study_group, y = DNA_concentration_ng_uL)) + 
+  geom_point(aes(color = Origin), position = position_jitter(width = 0.05), alpha = 0.8) +  
+  theme_classic() + 
+  theme(axis.text.x = element_text(vjust = 0.5, size = 12, angle = 45), # Angled x-axis labels
+        axis.text.y = element_text(vjust = 0.5, size = 12),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        legend.text = element_text(vjust = 0.5, size = 12),
+        panel.background = element_rect(fill = NA, color = 'black'),
+        strip.text = element_text(size = 12, face = "italic")) +
+  facet_wrap(~ Origin, scales = "free_y", ncol = 7) + coord_cartesian(ylim = c(0, 30))
+
+concentration_plot
+
+```
+
+#Fasta-file processing 
+```{r}
+
+head(list.files(path))
+
+# Read in the forward and reverse fastq file names
+fnFs <- list.files(path, pattern="_R1.fastq.gz", full.names=TRUE)
+fnRs <- list.files(path, pattern="_R2.fastq.gz", full.names=TRUE)
+head(fnFs)
+
+
+samples = str_extract(basename(fnFs), "^[^_]+")
+
+
+names(fnFs) <- samples
+names(fnRs) <- samples
+```
+```{r}
+
+fwd_primer <- "GTGCCAGCAGCCGCGGTAA"  #Wildcards: Y (4th position) = C or T ; M (9th position) = A or C
+rev_primer <- "GGACTACACGGGTWTCTAAT" #WCs: N (8th position) = G or A or T or C ; V (9th position) = A or C or G
+fwd_primer_rev <- as.character(reverseComplement(DNAStringSet(fwd_primer))) #can't get the reverse to work 
+rev_primer_rev <- as.character(reverseComplement(DNAStringSet(rev_primer)))
+
+# This function counts number of reads in which the primer is found
+count_primers <- function(primer, filename) {
+  num_hits <- vcountPattern(primer, sread(readFastq(filename)), fixed = FALSE)
+  return(sum(num_hits > 0))
+}
+
+count_primers(fwd_primer, fnFs[[1]])
+count_primers(rev_primer, fnRs[[1]])
+
+#Sanity check complete! no primers whatsoever 
+
+```
+```{r}
+plotQualityProfile(fnFs[c(2:10)])
+plotQualityProfile(fnRs[c(2:10)])
+# Good quality/bad quality? What are the read lengths?
+# How might these quality profiles inform our choice of truncation lengths?
+```
+```{r}
+# Define the paths to filtered files we are going to create
+filtFs <- file.path(path, "filtered", basename(fnFs)) 
+filtRs <- file.path(path, "filtered", basename(fnRs))
+# The filtered files will be in the `filtered/` sub-directory within `path`
+
+```
+
+#Filter and Trim 
+```{r}
+
+# Perform filtering and trimming (filterandTrim doesn't work for multithreading with Windows)
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, maxEE=5, 
+                     trimLeft=c(10,0), truncLen=c(240,200), truncQ=4) # REPLACE XXX/YYY with valid parameter choices
+                     # REPLACE XXX/YYY with valid parameter choices
+out
+```
+```{r}
+
+filtFs<- filtFs[file.exists(filtFs)] #filter out S9 because that sample failed
+filtRs <- filtRs[file.exists(filtRs)]
+
+# Learn the error model from the filtered data.
+errF <- learnErrors(filtFs, multi=TRUE) # `multi=TRUE` activates multi-threading to reduce computation time
+errR <- learnErrors(filtRs, multi=TRUE)
+
+# Visualize the error model. Points are observations, black line is fitted error model.`
+plotErrors(errF)
+plotErrors(errR)
+# Do the fitted error models look reasonable?
+
+# Run the DADA2 method using the fitted error model.
+ddF <- dada(filtFs, errF, pool="pseudo", multi=TRUE)
+ddR <- dada(filtRs, errR, pool="pseudo", multi=TRUE)
+# What pooling option makes sense? FALSE (default), "pseudo", or TRUE? See ?dada for more info
+# For more pseudo-pooling detail: https://benjjneb.github.io/dada2/pseudo.html#pseudo-pooling
+# Challenge: Try different pooling options and compare them.
+
+# Merge the denoised forward and reverse reads together.
+mm <- mergePairs(ddF, filtFs, ddR, filtRs, verbose=TRUE)
+
+# Construct a sequence table: rows are samples, columns are ASVs, values are abundances.
+# ASVs (columns) are ordered by their summed abundance across all samples.
+sta <- makeSequenceTable(mm)
+dim(sta)
+
+
+# Remove chimeric ASVs and construct a new chimera-free sequence table.
+st <- removeBimeraDenovo(sta, multi=TRUE, verbose=TRUE)
+sum(st)/sum(sta)
+# Were most reads retained during chimera removal? How about ASVs? 
+# How does the fraction of chimeric ASVs compare to the fraction of chimeric reads?
+
+##inspect the numbers of reads
+
+
+# In this case, most reads should make it through the entire pipeline!
+# Most importantly, a large majority (>80% of reads) should merge successfully,
+#  and almost all (>95%)  reads should pass chimera filtering.
+# IF THAT ISN'T THE CASE, you have a problem, and need to revisit your truncation lengths
+#   (merging problem) or primer removal (trimLeft, chimera problem).
+
+# Code derived from the dada2 tutorial: https://benjjneb.github.io/dada2/tutorial.html
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(ddF, getN), sapply(ddR, getN), sapply(mm, getN), rowSums(st))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- basename(fnFs)
+head(track)  #reads look good!
+
+
+```
+
+#Assign taxonomy 
+```{r}
+# The dada2 taxonomic reference page https://benjjneb.github.io/dada2/training.html has links to a 
+#   number of reference databases formatted to work with `assignTaxonomy`.I recommend Silva for 16S.
+#   However, here we will use RDP in this lab for file size reasons.
+#download.file("https://zenodo.org/record/4310151/files/rdp_train_set_18.fa.gz?download=1",
+#              "rdp_train_set_18.fa.gz"
+
+
+# Assign taxonomy down to the genus level to these 16S ASVs.
+tax <- assignTaxonomy(st, "C:/Users/marce/Desktop/Heron/CHOP_Files/silva_nr99_v138.1_wSpecies_train_set.fa.gz", multi=TRUE)
+unname(head(tax)) # unname strips the long ASV rownames to make the printed output more readable
+# Are reasonable taxonomic assignments being made to the abundant taxa? YES
+
+addSpecies <- addSpecies(tax, "C:/Users/marce/Desktop/Heron/CHOP_Files/silva_species_assignment_v138.1.fa")
+
+write.table(addSpecies, "C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/16S_taxonomy.csv", row.names = TRUE, sep ="\t", quote =FALSE)
+
+```
+
+#Let's check on the Mock community
+```{r}
+# unqs.mock <- st["mockdna1_R1.fastq.gz",]
+# unqs.mock <- sort(unqs.mock[unqs.mock>0], decreasing=TRUE) # Drop ASVs absent in the Mock
+# cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock community.\n")
+# 
+# mock.ref <- getSequences(file.path(path, "mockdna1.fasta"))
+# match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
+# cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+
+```
+
+#Constuct Phylogentic Tree 
+```{r}
+sequences<-getSequences(st) #from DADA2
+names(sequences)<-sequences
+```
+```{r}
+# Align sequences
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor = NA)
+
+alignment_matrix <- as.matrix(alignment)
+phang.align <- phyDat(alignment_matrix, type = "DNA")
+
+# Build distance matrix and tree
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm)
+
+# Optional: optimize tree
+fit <- pml(treeNJ, data = phang.align)
+
+```
+```{r}
+
+fitGTR <- update(fit, k=4, inv=0.2) #calculate tree likelihood and optimize model
+#fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+                    #rearrangement = "stochastic", control = pml.control(trace = 0))  #take WAY TOO LONG - aborted 
+
+save(fitGTR, file="fitGTR.RData")
+
+tree <- fitGTR$tree
+
+
+ps@phy_tree<-fitGTR$tree
+saveRDS(ps, "CHOP_Heron_Jan2025/ps_tree.rds")
+ps <- readRDS("CHOP_Heron_Jan2025/ps_tree.rds")
+
+ps
+
+
+```
+
+#Read in the metadata
+```{r}
+metadata <- read.csv("C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/CHOPMC430_Barrot_only_16S_mapping_file.tsv", 
+                     header = TRUE,
+                     check.names = FALSE)
+
+# Save it as a clean CSV
+write.csv(metadata, 
+          "C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/metadata.csv", 
+          row.names = FALSE)
+
+#create new metadata file with relevant data 
+Heron16S_full <- read.csv("C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/Heron16S_metadata_full.csv")
+
+#make rownames 
+Heron16S_full <- data.frame(Heron16S_full[,-1], row.names=Heron16S_full[,1])
+
+#create phyloseq object 
+
+#ps<- readRDS("CHOP_Heron_Jan2025/ps.rds")
+
+ps <- phyloseq(sample_data(Heron16S_full),otu_table(st, taxa_are_rows=FALSE), tax_table(addSpecies), tree)
+#ps <- phyloseq(sample_data(Heron16S_full),otu_table(st, taxa_are_rows=FALSE), tax_table(addSpecies))
+
+ps
+
+```
+##root the tree 
+```{r}
+
+set.seed(711)
+phy_tree(ps) <- root(phy_tree(ps), sample(taxa_names(ps), 1), resolve.root = TRUE)
+is.rooted(phy_tree(ps))
+
+```
+
+##replace w/ ASVs 
+```{r}
+
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+
+saveRDS(ps, "CHOP_Heron_Jan2025/ps_tree.rds")
+
+ps
+# ^^^ add ASVs: more convenient to use short names for our ASVs (e.g. ASV21) rather than 
+#the full DNA sequence when working with some of the tables and visualizations from 
+#phyloseq, but we want to keep the full DNA sequences for other purposes like merging 
+#with other datasets or indexing into reference databases like the Earth Microbiome Project. 
+#For that reason we’ll store the DNA sequences of our ASVs in the refseq slot of the phyloseq object, 
+#and then rename our taxa to a short string. That way, the short new taxa names will appear in tables and plots, 
+#and we can still recover the DNA sequences corresponding to each ASV as needed with refseq(ps). 
+```
+
+
+#Decontam 
+```{r}
+library(decontam); packageVersion("decontam")
+download.file("https://raw.githubusercontent.com/mblstamps/stamps2024/main/dada2-and-decontam-labs/decontam_lab_bile.R", "decontam_lab_bile.R")
+
+head(sample_data(ps))
+sample_data(ps)$controls_or_naw <- ifelse(sample_data(ps)$Sample_Type == "Control", T, F) #create vector
+
+df <- data.frame(sample_data(ps)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Sample_Type)) + geom_point()
+
+#sample_data(ps)$SampleID<-rownames( sample_data(ps))
+sample_data(ps)$final_library_conc_ng_ul<- as.numeric(sample_data(ps)$final_library_conc_ng_ul)
+
+```
+
+##Combined method
+```{r}
+
+contamdf.freq <- isContaminant(ps, method="combined", conc="final_library_conc_ng_ul", neg="controls_or_naw", threshold=0.1)
+head(contamdf.freq)
+table(contamdf.freq$contaminant) #returned 174 TRUE contaminants
+head(which(contamdf.freq$contaminant))  
+
+#visualize between a "FALSE" ASV and a "TRUE" ASV 
+plot_frequency(ps, taxa_names(ps)[c(1,23)], conc="final_library_conc_ng_ul") + 
+  xlab("DNA Concentration (Final Library prep")
+
+#let's look at a couple more classfied "TRUE"s
+set.seed(100)
+plot_frequency(ps, taxa_names(ps)[sample(which(contamdf.freq$contaminant),3)], conc="final_library_conc_ng_ul") +
+  xlab("DNA Concentration")
+```
+
+```{r}
+
+# Inspecting sequences at the extremes of the score distribution can help guide
+#   choices about contaminant classification.
+# Let's look more closely at the 10 highest scores (the 10 ASVs that look the most like non-contaminants according to decontam)
+i.top10 <- order(contamdf.freq$p, decreasing=TRUE)[1:10]
+contamdf.freq[i.top10,]
+# Print out those ASV sequences in a fasta format
+
+#dada2:::pfasta(sq[contamdf.freq$ASV[i.top10]], id=contamdf.freq$Phylum[i.top10])
+# Use the NCBI web BLAST interface (https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&BLAST_SPEC=GeoBlast&PAGE_TYPE=BlastSearch) 
+# to BLAST those sequences against Standard databases (nr etc.) -- nr/nt
+
+
+# Now look at the the 10 lowest scores (the 10 ASVs that look the most like contaminants according to decontam)
+i.bottom10 <- order(contamdf.freq$p, decreasing=FALSE)[1:10]
+contamdf.freq[i.bottom10,] #9/10 classified as contaminates
+#dada2:::pfasta(sq[contam$ASV[i.bottom10]], id=contam$Phylum[i.bottom10])
+
+```
+##Prune contaminants
+```{r}
+#get rid of contaminants!
+ps.clean <- prune_taxa(!contamdf.freq$contaminant, ps)
+ps.clean #okay so ps originally had 11953 taxa and cleaning the contaminants made it go down to 11779 taxa - so almost 200 taxa removed
+
+saveRDS(ps.clean, "CHOP_Heron_Jan2025/ps.cleantree.rds")
+
+#ps.clean<-readRDS('CHOP_Files/ps.cleantree.rds')
+
+
+#plot # of reads by ASVs
+ASV_sums<-as.data.frame(taxa_sums(ps))
+plot_bar(ASV_sums) 
+
+```
+
+##Remove global singletons 
+```{r}
+#decontam takes care of a lot of contaminants first but just to ensure
+
+sum(taxa_sums(ps.clean) == 1)
+# just 1 
+
+ps.clean <- prune_taxa(taxa_sums(ps.clean) > 1, ps.clean) #now 11768 taxa over 187 samples 
+
+
+```
+
+#Initial Exploration of data 
+```{r}
+
+qplot(log10(rowSums(otu_table(ps.clean))),binwidth=0.2) +
+  xlab("Logged counts-per-sample") 
+
+rel_abund <- t(apply(otu_table(ps.clean), 1, function(x) x / sum(x)))
+qplot(rel_abund[, 12], geom = "histogram",binwidth=0.05) +
+  xlab("Relative abundance")
+```
+```{r}
+nsamples(ps.clean)
+sample_names(ps.clean)
+sample_variables(ps.clean)
+
+# check out our otu count data 
+sample_sums(ps.clean)
+ntaxa(ps.clean)
+head(taxa_sums(ps.clean), 20)
+
+# check out our taxonomy table + filtering 
+rank_names(ps.clean)
+table(tax_table(ps.clean)[, "Class"], exclude = NULL)
+
+```
+
+#Filtering: take out chloroplast + mitochondria 
+```{r}
+ps.clean <- subset_taxa(ps.clean, Family != "Mitochondria") #ps.clean 
+ps.clean <- subset_taxa(ps.clean, Order != "Chloroplast") 
+
+#now 8839 taxa! 
+
+saveRDS(ps.clean, 'CHOP_Heron_Jan2025/ps.cleantree.rds')
+
+```
+
+##Only P.dam 
+```{r}
+ps_pdam <- subset_samples(ps.clean, Type_ID %in% c("Pocillopora damicornis"))
+ps_pdam
+
+#ps_mock <-subset_samples(ps.clean, Sample_Type %in% c("Real", "MockDNA"))
+
+otu <- as.data.frame(otu_table(ps_pdam))
+tax <- as.data.frame(tax_table(ps_pdam))
+
+#  transpose if samples are in columns instead of rows
+if (taxa_are_rows(ps_pdam)) {
+  otu <- t(otu_pdam)
+}
+
+# Create a vector of taxa names from the taxonomy table
+# You can customize how the names are built — for example, using Genus and Species
+tax_names <- apply(tax, 1, function(x) {
+  paste(na.omit(x), collapse = "_")
+})
+
+# Replace ASV IDs with the constructed taxa names
+colnames(otu) <- tax_names[colnames(otu)]
+
+# Check the updated otu table
+head(otu)
+
+
+```
+
+##filter samples
+```{r}
+sum(sample_sums(ps_pdam) == 0)  # how many had zero counts - only one sample FP108
+ps_pdam <- prune_samples(sample_sums(ps_pdam) > 0, ps_pdam) #REMOVE FP108
+
+sample_sums(ps_pdam)
+
+#REmove samples with low read count - HB04 and SL51 never existed in the first place and FP54 and SL109 fastq files were corrupt. So 176 starting samples 
+
+ #cutoff for samples is 10K read
+#taking out: FP02 (5222), FP05 (3855), FP59 (9499), DL03 (9632), HB02 (2163), HB05 (1360), HB07 (1000), HB08 (5537), HB103 (162), HB106 (242), HB108 (8644), HB56 (3211), RC01 (6410), RC04 (29), RC07 (1384), RC101 (6338), RC102 (8220), RC108 (8609), RC53 (3708), SL08 (4088), SL10 (2), RF107 (7821) 
+bad_samples <- c("FP02_R1.fastq.gz", "FP05_R1.fastq.gz",
+                 "FP59_R1.fastq.gz", "DL03_R1.fastq.gz",
+                 "HB02_R1.fastq.gz", "HB05_R1.fastq.gz", 
+                 "HB07_R1.fastq.gz", "HB08_R1.fastq.gz",
+                 "HB103_R1.fastq.gz", "HB106_R1.fastq.gz",
+                 "HB108_R1.fastq.gz", "HB56_R1.fastq.gz",
+                 "RC01_R1.fastq.gz", "RC04_R1.fastq.gz", 
+                 "RC07_R1.fastq.gz", "RC101_R1.fastq.gz",
+                 "RC102_R1.fastq.gz", "RC108_R1.fastq.gz",
+                 "RC53_R1.fastq.gz", "SL08_R1.fastq.gz",
+                 "SL10_R1.fastq.gz", "RF107_R1.fastq.gz")
+
+ps_pdam  <- prune_samples(!(sample_names(ps_pdam ) %in% bad_samples), ps_pdam )
+#n = 47/59 for Sept 2022, n = 55/58 for May 2024, n = 51/59 for Sept 2024
+
+ps_pdam #153 samples 
+
+```
+
+```{r}
+sample_data(ps_pdam)$Timepoint <- factor(sample_data(ps_pdam)$Timepoint,
+                                         levels = c("Pre", "Bleach", "Post"),
+                                         labels = timepoint_labels)
+
+# Define and name timepoint colors
+timepoint_labels <- c("Sept. 2022", "May 2024", "Sept. 2024")
+timepoint_colors <- c("steelblue3", "violetred", "#1b9e77")
+names(timepoint_colors) <- timepoint_labels
+
+
+site_colors_micro <- c(
+  "Harry's Bommie" = "#131142FF",
+  "Fourth Point" = "dodgerblue2",
+  "Deep Lagoon" = "steelblue1",
+  "Shallow Lagoon" = "brown1",
+  "Reef Crest" = "#C1000e",
+  "Reef Flat" = "violetred")
+```
+#SEPT 2022 ANALYSIS 
+```{r}
+
+ps_t1 <- prune_samples(sample_data(ps_pdam)$Timepoint == "Sept. 2022", ps_pdam)
+
+
+# Then prune taxa that have zero abundance across all remaining samples (this is leftover from the other timepoints)
+ps_t1 <- prune_taxa(taxa_sums(ps_t1) > 0, ps_t1)
+
+ps_t1 #2835 taxa, 47 samples 
+
+```
+
+#Rarefraction curve for read cutoff 
+```{r}
+otu <- as(otu_table(ps_t1), "matrix")
+
+# Make sure samples are rows
+if (taxa_are_rows(ps_t1)) {otu <- t(otu)}
+
+# Rarefaction curves
+rarecurve(otu, step = 1000, 
+          sample = min(rowSums(otu)), 
+          col = "darkblue", cex = 0.6, label = FALSE)
+
+sample_sums(ps_t1)
+
+```
+
+#Alpha Diversity - Sept 2022
+```{r}
+set.seed(123)  # reproducibility
+ps_t1_rare <- rarefy_even_depth(ps_t1, 
+                                sample.size = 10000,   # cutoff depth
+                                rngseed = 123,
+                                replace = FALSE, 
+                                verbose = TRUE)
+
+```
+```{r}
+# Get richness estimates with rare sample metadata
+richness <- estimate_richness(ps_t1_rare, measures = "Shannon")
+richness$Origin <- sample_data(ps_t1_rare)$Origin
+richness$Origin <- factor(richness$Origin, levels = c(
+  "Harry's Bommie", 
+  "Fourth Point", 
+  "Deep Lagoon", 
+  "Shallow Lagoon", 
+  "Reef Crest", 
+  "Reef Flat"))
+
+
+shannondf <- summarySE(richness, measurevar= "Shannon", groupvars = c("Origin"), na.rm = TRUE)
+shannondf
+
+
+```
+
+##stats
+```{r}
+#hist(pdamRichness$Shannon, main="Shannon index", xlab="")
+pdamRichness_sept22 <- estimate_richness(ps_t1_rare, measures = "Shannon")
+pdamRichness_sept22$Origin <- sample_data(ps_t1_rare)$Origin
+head(pdamRichness_sept22)
+
+
+# model + ANOVA (Type II) + Tukey
+fit <- lm(Shannon ~ Origin, data = pdamRichness_sept22)
+car::Anova(fit, type = 2)
+
+tukey_shannon <- emmeans::emmeans(fit, pairwise ~ Origin, adjust = "tukey")
+tukey_shannon
+
+
+#NO SIGNIFICANCE 
+
+
+
+```
+##plot
+```{r}
+shannon_div <- ggplot(richness, aes(x = Origin, y = Shannon, fill = Origin)) +
+  geom_boxplot(width = .5, outlier.shape = NA, alpha = 0.8, size = 1) +
+    geom_jitter(width = 0.15, size = 4, alpha = 0.8, 
+    shape = 21,stroke = 0.7) +
+  scale_fill_manual(values = site_colors_micro, name = "Site",
+    labels = c(
+      "Harry's Bommie" = "HB",
+      "Fourth Point" = "FP",
+      "Deep Lagoon" = "DL",
+      "Shallow Lagoon" = "SL",
+      "Reef Crest" = "RC",
+      "Reef Flat" = "RF")) +
+  scale_x_discrete(labels = c(
+    "Harry's Bommie" = "HB",
+    "Fourth Point" = "FP",
+    "Deep Lagoon" = "DL",
+    "Shallow Lagoon" = "SL",
+    "Reef Crest" = "RC",
+    "Reef Flat" = "RF")) +
+theme(
+    axis.text.x  = element_blank(),
+    axis.text.y = element_text(size = 18),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    axis.title.x = element_blank(),
+    panel.background = element_rect(fill = NA, color = "black"),
+    legend.title = element_text(face = "bold", size = 16),
+    legend.text = element_text(size = 12),
+    #legend.position = "none"
+    ) +
+  labs(x = "Site", y = "Shannon Diversity\nIndex (H')")
+
+shannon_div
+
+```
+
+#Beta Diversity 
+```{r}
+
+distNMDS_pst1 <- phyloseq::distance(ps_t1, method = "bray")
+ordination_pst1 <- ordinate(ps_t1, method = "NMDS", distance = distNMDS_pst1)
+
+ordination_pst1$stress
+
+```
+##Plot BD
+```{r}
+sample_data(ps_t1)$Origin <- factor(sample_data(ps_t1)$Origin,
+                                    levels = c("Harry's Bommie",
+                                               "Fourth Point",
+                                               "Deep Lagoon",
+                                               "Shallow Lagoon",
+                                               "Reef Crest",
+                                               "Reef Flat"))
+
+p_t1_beta_NMDS <- plot_ordination(ps_t1, ordination_pst1, color = "Origin") +
+  geom_point(size = 4) +
+  stat_ellipse(aes(group = Origin, color = Origin), level = 0.7, size = 1) +
+  scale_color_manual("Origin",
+    values = c("Harry's Bommie"="#131142FF","Fourth Point"="dodgerblue2",
+               "Deep Lagoon"="steelblue1","Shallow Lagoon"="brown1",
+               "Reef Crest"="#C1000e","Reef Flat"="violetred")) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  theme(
+    panel.background = element_rect(fill = NA, color = "black"),
+    #legend.position = "plot",
+    legend.position = c(0.98, 0.98),
+    legend.justification = c("right", "top"),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    #legend.background = element_rect(fill = "white", color = NA)
+  ) +
+  annotate("text",
+           x = -Inf, y = Inf,
+           label = paste("Stress =", round(ordination_pst1$stress, 3)),
+           hjust = -0.05, vjust = 1.1, size = 4)
+
+p_t1_beta_NMDS
+```
+##Stats  
+```{r}
+meta.sept22 <- data.frame(sample_data(ps_t1))
+meta.sept22 <- meta.sept22[match(rownames(as.matrix(distNMDS_pst1)), rownames(meta.sept22)), ]
+#meta.sept22$Origin <- droplevels(factor(meta.sept22$Origin))
+
+# PERMANOVA (effect of Origin on community composition)
+perm_res <- adonis2(distNMDS_pst1 ~ Origin,
+                    data = meta.sept22,
+                    permutations = 9999,  # more perms = stabler p
+                    by = "terms")
+perm_res #is significant 
+
+
+#pairwise 
+pairwise.adonis(distNMDS_pst1, factors = sample_data(ps_t1)$Origin,
+                                p.adjust.m = "BH")  #is signficant multiple interactions
+
+#check betadispersion,
+bd <- betadisper(distNMDS_pst1, meta.sept22$Origin)   # distances to group centroids
+disp_res <- permutest(bd, permutations = 9999)
+disp_res
+#not significant at p = 0.3052
+
+
+dispersion_df <- data.frame(
+  DistanceToCentroid = bd$distances,
+  Origin = meta.sept22$Origin)
+
+dispersion_df$Origin <- factor(dispersion_df$Origin, levels = c(
+  "Harry's Bommie", 
+  "Fourth Point", 
+  "Deep Lagoon", 
+  "Shallow Lagoon", 
+  "Reef Crest", 
+  "Reef Flat"))
+
+
+lm_disp <- lm(DistanceToCentroid ~ Origin, data = dispersion_df)
+emmeans_disp <- emmeans(lm_disp, pairwise ~ Origin, adjust = "tukey")
+emmeans_disp #pairwise not significant for beta dispersion for NMDS 
+
+#BH (Benjamini–Hochberg) controls the false discovery rate (FDR)—the expected proportion of false positives among the pairs you call significant—while keeping more power than very conservative options (Bonferroni/Holm). It’s a good default for exploratory pairwise PERMANOVA tables.
+
+```
+##plot beta dispersion
+```{r}
+beta_dispersion_plot <- ggplot(dispersion_df, aes(x = Origin, y = DistanceToCentroid, fill = Origin)) +
+    geom_boxplot(width = .5, outlier.shape = NA, alpha = 0.8, size = 1) +
+    geom_jitter(width = 0.15, size = 4, alpha = 0.8, 
+    shape = 21,stroke = 0.7) +
+  scale_fill_manual(values = site_colors_micro,   name = "Site",labels = c(
+      "Harry's Bommie" = "HB",
+      "Fourth Point" = "FP",
+      "Deep Lagoon" = "DL",
+      "Shallow Lagoon" = "SL",
+      "Reef Crest" = "RC",
+      "Reef Flat" = "RF")) +
+  scale_x_discrete(labels = c(
+    "Harry's Bommie" = "HB",
+    "Fourth Point" = "FP",
+    "Deep Lagoon" = "DL",
+    "Shallow Lagoon" = "SL",
+    "Reef Crest" = "RC",
+    "Reef Flat" = "RF")) +
+  theme_classic() +
+  theme(
+    axis.text.x  = element_text(size =18),
+    axis.text.y = element_text(size = 18),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    panel.background = element_rect(fill = NA, color = "black"),
+    legend.title = element_text(face = "bold", size = 16),
+    legend.text = element_text(size = 12),
+    legend.position = "none") +
+  labs(x = "Site", y = "Beta dispersion")
+
+beta_dispersion_plot
+
+```
+
+#Relative Abundance
+##Absolute abundance
+```{r}
+#absolute 
+plot_bar(ps_t1, x="SampleID", fill="Phylum") + theme_classic() 
+plot_bar(ps_t1, x="SampleID", fill="Family") + theme_classic()
+plot_bar(ps_t1, x="SampleID", fill="Genus") + theme_classic() #too big to visualize
+
+```
+```{r}
+#Relative abundance at different taxa levels 
+pdam_fam <-tax_glom(ps_t1, "Family")
+pdam_phy <-tax_glom(ps_t1, "Phylum")
+pdam_gen <-tax_glom(ps_t1, "Genus")
+pdam_order <-tax_glom(ps_t1, "Order")
+```
+
+```{r}
+otu_table_ps <- otu_table(ps_t1)
+
+# Transpose the OTU table so that samples are rows and taxa are columns
+otu_table_ps <- t(otu_table_ps)
+
+# Convert counts to relative abundance
+otu_table_rel_abund <- otu_table_ps / rowSums(otu_table_ps)
+
+head(otu_table_rel_abund)
+
+otu_rel_abund_df <- as.data.frame(otu_table_rel_abund)
+write.csv(otu_rel_abund_df, "C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/relative_abundance.csv")
+
+```
+
+##Phylum Level
+```{r}
+
+ps_s22_phy <- subset_samples(pdam_phy)
+ps_s22_phy <- prune_taxa(taxa_sums(ps_s22_phy) > 0, ps_s22_phy)
+
+pdam_phy_rel <- transform_sample_counts(ps_s22_phy, function(x) x/sum(x))
+pdam_phy_rel <- prune_taxa(top20, pdam_phy_rel)
+#pdam_fam_rel_abund <- ps_prune(pdam_fam_rel, min.abundance =0.03) #filter low abundant
+pdam_phy_df <- psmelt(pdam_phy_rel)
+```
+```{r}
+ggplot(pdam_phy_df, aes(x = Origin, y = Abundance, fill = Phylum)) + 
+  theme_classic() + geom_bar(stat = "identity")
+
+ggplot(pdam_phy_df, aes(x = SampleID, y = Abundance, fill = Phylum)) + 
+  theme_classic() + geom_bar(stat = "identity") + facet_grid(~ Origin, space = "free", scales = "free") 
+
+```
+##Order level
+```{r}
+
+ps_s22_ord <- subset_samples(pdam_order)
+ps_s22_ord <- prune_taxa(taxa_sums(ps_s22_ord) > 0, ps_s22_ord)
+
+pdam_ord_rel <- transform_sample_counts(ps_s22_ord, function(x) x/sum(x))
+pdam_ord_rel <- prune_taxa(top20, pdam_ord_rel)
+pdam_ord_df <- psmelt(pdam_ord_rel)
+
+ggplot(pdam_ord_df, aes(x = Origin, y = Abundance, fill = Order)) + 
+  theme_classic() + geom_bar(stat = "identity")+ ggtitle("Relative Abundance: Top 20 Order")
+
+ggplot(pdam_ord_df, aes(x = SampleID, y = Abundance, fill = Order)) + 
+  theme_classic() + geom_bar(stat = "identity") + facet_grid(~ Origin, space = "free", scales = "free") +
+  theme(axis.text.x = element_text(angle = 35, hjust=1)) + 
+  labs(x = "Sample ID") + ggtitle("Relative Abundance:Order")
+
+```
+##Genus level
+```{r}
+
+#pdam_gen_t1 <-tax_glom(ps_t1, "Genus")
+
+ps_s22 <- subset_samples(pdam_gen)
+ps_s22 <- prune_taxa(taxa_sums(ps_s22) > 0, ps_s22) #removes 0 ASVs that were present in other timepoints 
+ps_s22_rel <- transform_sample_counts(ps_s22, function(x) x / sum(x))
+
+percentages_glom <- tax_glom(ps_s22_rel, taxrank = 'Genus')
+#View(percentages_glom@tax_table@.Data)
+
+
+df_s22 <- psmelt(percentages_glom)
+
+df_s22$Genus <- as.factor(df_s22$Genus)
+genus_colors <-colorRampPalette(brewer.pal(8,"Dark2")) (length(levels(df_s22$Genus)))
+names(genus_colors) <- levels(df_s22$Genus)
+
+df_s22$Genus <- as.character(df_s22$Genus) 
+
+filtered_df_s22 <- df_s22 %>%
+  dplyr::filter(Abundance >= 0.05)
+
+
+#df_s22$Genus[df_s22$Abundance < 0.1] <- "Genus < 0.1% abund."
+unique(filtered_df_s22$Genus)
+
+abundance_sum<-summarySE(filtered_df_s22, measurevar='Abundance', groupvars=c('Origin','Genus', 'SampleID'), na.rm=TRUE, conf.interval = 0.95)
+abundance_sum
+
+df_s22$Origin <- factor(df_s22$Origin, levels = c(
+  "Harry's Bommie", "Fourth Point", "Deep Lagoon",
+  "Shallow Lagoon", "Reef Crest", "Reef Flat"))
+
+# Plot
+relative_plot_genus<- ggplot(abundance_sum, aes(x = SampleID, y = Abundance, fill = Genus)) + facet_wrap(~Origin, scales="free")+
+  geom_bar(stat = "identity", color ="black", stroke =.25) +
+  #scale_fill_manual(values = genus_colors) +
+  theme_classic() +
+  #scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  ) +
+  labs(title = "Genus-Level Relative Abundance (Sept. 2022)",
+       x = NULL, y = "Relative Abundance")
+
+relative_plot_genus
+
+
+```
+##Family level
+```{r}
+ps_s22_fam <- subset_samples(pdam_fam)
+ps_s22_fam <- prune_taxa(taxa_sums(ps_s22_fam) > 0, ps_s22_fam) #removes 0 ASVs that were present in other timepoints 
+
+ps_s22_rel_fam <- transform_sample_counts(ps_s22_fam, function(x) x / sum(x))
+
+percentages_glom_fam <- tax_glom(ps_s22_rel_fam, taxrank = 'Family')
+#View(percentages_glom@tax_table@.Data)
+
+
+df_s22_fam <- psmelt(percentages_glom_fam)
+df_s22_fam$Family <- as.factor(df_s22_fam$Family)
+df_s22_fam$Family <- as.character(df_s22_fam$Family) 
+
+df_s22_fam$Origin <- factor(df_s22_fam$Origin, levels = c(
+  "Harry's Bommie", "Fourth Point", "Deep Lagoon",
+  "Shallow Lagoon", "Reef Crest", "Reef Flat"))
+
+filtered_df_s22_fam <- df_s22_fam %>%
+  dplyr::filter(Abundance >= 0.05)
+
+
+#df_s22$Genus[df_s22$Abundance < 0.1] <- "Genus < 0.1% abund."
+unique(filtered_df_s22_fam$Family)
+
+abundance_sum_fam<-summarySE(filtered_df_s22_fam, measurevar='Abundance', groupvars=c('Origin','Family', 'SampleID'), na.rm=TRUE, conf.interval = 0.95)
+abundance_sum_fam
+write.csv(abundance_sum_fam, "rel_abundance_filtered.csv", row.names = FALSE)
+
+abundance_sum_fam <- abundance_sum_fam %>%
+  mutate(Family = factor(Family)) %>%
+  droplevels()
+
+families_present <- levels(abundance_sum_fam$Family)
+n_fam <- length(families_present)
+
+# Build a Paired palette sized to n_fam
+base_pal <- brewer.pal(12, "Paired")
+if (n_fam <= 12) {
+  pal <- brewer.pal(max(3, n_fam), "Paired")[seq_len(n_fam)]
+} else {
+  pal <- colorRampPalette(base_pal)(n_fam)  # extend beyond 12
+}
+names(pal) <- families_present
+
+relative_plot_fam <- ggplot(abundance_sum_fam, aes(x = SampleID, y = Abundance, fill = Family)) +
+  facet_wrap(~Origin, scales = "free_x", nrow = 1, ncol = 6) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.25) +
+  scale_fill_manual(values = pal,
+                    breaks = families_present,
+                    limits = families_present,
+                    drop   = TRUE) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 16), axis.title.y = element_text(size = 16, face = "bold"), axis.text.y = element_text(size=16),legend.title = element_text(size = 16, face = "bold"),
+        legend.position = "right", legend.text = element_text(size = 12),strip.text = element_text(size = 16, face = "bold")) +
+  labs(x = NULL, y = "Family-level\nrelative abundance")
+
+relative_plot_fam
+
+```
+
+#Microbial PCA
+##PCA w/distance to centroids
+```{r}
+ps_clr <- microbiome::transform(ps_s22_fam, "clr")
+
+# Extract CLR OTU table
+otu_clr <- otu_table(ps_clr)
+if (taxa_are_rows(ps_clr)) otu_clr <- t(otu_clr)
+
+pca_res <- prcomp(otu_clr, center = TRUE, scale. = FALSE)
+
+# Build PCA dataframe
+pca_df <- as.data.frame(pca_res$x) %>%
+  rownames_to_column("SampleID")
+
+#extract metadata
+metadata <- as(sample_data(ps_s22_fam), "data.frame")
+
+# Ensure SampleID is a column (overwrite with rownames if needed)
+metadata$SampleID <- rownames(metadata)
+
+# Merge PCA results with metadata
+pca_df <- left_join(pca_df, metadata, by = "SampleID")
+
+var_exp <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
+x_lab <- sprintf("PC1 (%.1f%% explained var.)", 100 * var_exp[1])
+y_lab <- sprintf("PC2 (%.1f%% explained var.)", 100 * var_exp[2])
+
+# PCA plot with percent on axes
+p_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Origin)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(title = "PCA of CLR-Transformed Microbiome Data",
+       x = x_lab, y = y_lab) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_pca
+
+
+var_exp <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
+data.frame(PC = seq_along(var_exp),
+           prop = var_exp,
+           cum  = cumsum(var_exp))[1:10, ]
+```
+
+```{r}
+loadings_df <- as.data.frame(pca_res$rotation[, 1:2])  # PC1 and PC2 only
+loadings_df$Taxon <- rownames(loadings_df)
+
+loadings_df$Magnitude <- sqrt(loadings_df$PC1^2 + loadings_df$PC2^2)
+
+loadings_df <- tibble::as_tibble(loadings_df)
+
+top_taxa <- dplyr::arrange(loadings_df, desc(Magnitude)) %>%
+  dplyr::slice(1:20)
+
+
+tax_df <- tax_table(ps_t1) %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon")
+
+# Merge taxonomy with top_taxa
+top_taxa_annotated <- left_join(top_taxa, tax_df, by = "Taxon")
+
+top_taxa_annotated <- top_taxa_annotated %>% #fix labels 
+  mutate(Label = ifelse(!is.na(Family), Family,
+                        ifelse(!is.na(Family), Family, Taxon)))
+
+
+scale_factor <- 100 
+
+p_pca_biplot <- p_pca +
+  geom_segment(data = top_taxa_annotated,
+               aes(x = 0, y = 0,
+                   xend = PC1 * scale_factor,
+                   yend = PC2 * scale_factor),
+               arrow = arrow(length = unit(0.2, "cm")),color = "black",inherit.aes = FALSE) +
+  geom_text(data = top_taxa_annotated,
+            aes(x = PC1 * scale_factor * 1.06,
+                y = PC2 * scale_factor * 1.06,
+                label = Label),size = 4,hjust = 0.5,inherit.aes = FALSE)
+
+p_pca_biplot
+
+```
+```{r}
+
+centroids_df <- pca_df %>%
+  group_by(Origin) %>%
+  dplyr::summarize(PC1 = mean(PC1),
+            PC2 = mean(PC2),
+            .groups = "drop")
+
+desired_order <- c("Harry's Bommie", "Fourth Point", "Deep Lagoon", "Shallow Lagoon", "Reef Crest", "Reef Flat")
+
+centroids_df$Origin <- factor(centroids_df$Origin, levels = desired_order)
+
+centroids_df <- centroids_df %>%
+  arrange(factor(Origin, levels = desired_order))
+
+label_offset <- 0.08
+
+lab_df <- top_taxa_annotated %>%
+  mutate(
+    len = sqrt(PC1^2 + PC2^2),
+    x_tip = PC1 * scale_factor,
+    y_tip = PC2 * scale_factor,
+    nudge_x = (PC1 / len) * label_offset,
+    nudge_y = (PC2 / len) * label_offset)
+
+p_pca_centroids <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Origin)) +
+  geom_point(size = 4, alpha = 0.8) + stat_ellipse(aes(color = Origin),level = 0.8, geom = "path", linetype = "solid", size = 1) +
+  geom_segment(data = top_taxa_annotated,
+               aes(x = 0, y = 0,
+                   xend = PC1 * scale_factor,
+                   yend = PC2 * scale_factor),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color = "black", inherit.aes = FALSE) +
+  geom_text_repel(
+    data = lab_df,
+    aes(x = x_tip, y = y_tip, label = Label),
+    nudge_x = lab_df$nudge_x,
+    nudge_y = lab_df$nudge_y,
+    size = 5,
+    box.padding = 0.35,
+    point.padding = 0.25,
+    min.segment.length = 0,
+    segment.size = 0.3,
+    seed = 42,
+    max.overlaps = Inf, color = "black") +
+  geom_hline(yintercept = 0, linetype = 2, alpha = 0.8, color = "darkgray") + 
+  geom_vline(xintercept = 0, linetype = 2, alpha = 0.8, color = "darkgray") +
+  scale_color_manual(values = site_colors_micro) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(size = 18),
+    axis.text.y = element_text(size = 18),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    legend.text  = element_text(size = 18),
+    panel.background = element_rect(fill = NA, color = 'black'),
+    #legend.position = c(0.02, 0.98),
+    legend.position = "none",
+    #legend.justification = c("left", "top"),
+    plot.margin = margin(10, 20, 10, 20)) +
+  coord_cartesian(clip = "off") +
+  labs(x = x_lab, y = y_lab)
+
+p_pca_centroids
+```
+
+##stats PCA 
+```{r}
+
+adon_one <- adonis2(dist_clr ~ Origin, data = pca_df,
+                    permutations = 9999, by = "margin")
+adon_one
+#significant effect of origin
+
+rownames(pca_df) <- pca_df$SampleID
+pairwise_results_micro <- pairwise.adonis(
+  x = as.matrix(dist_clr),
+  factors = pca_df$Origin,
+  perm = 9999,
+  p.adjust.m = "BH")
+
+pairwise_results_micro #not significant but that;s okay
+
+```
+
+##environmental inset - PCA 
+```{r}
+
+env_vars 
+
+env_summary <- phys %>%
+  dplyr::select(Origin, all_of(env_vars)) %>%
+  distinct(Origin, .keep_all = TRUE)
+
+env_summary <- env_summary %>%
+  mutate(
+    Origin = dplyr::recode(
+      Origin,
+      "HB" = "Harry's Bommie",
+      "FP" = "Fourth Point",
+      "DL" = "Deep Lagoon",
+      "SL" = "Shallow Lagoon",
+      "RC" = "Reef Crest",
+      "RF" = "Reef Flat"))
+
+#check that names match microbiome metadata
+unique(env_summary$Origin)
+unique(pca_df$Origin)
+
+centroids_env <- pca_df %>%
+  group_by(Origin) %>%
+  dplyr::summarize(
+    PC1 = mean(PC1, na.rm = TRUE),
+    PC2 = mean(PC2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(env_summary, by = "Origin")
+
+# Check for missing environmental data after join
+centroids_env %>%
+  filter(if_any(all_of(env_vars), is.na)) %>%
+  dplyr::select(Origin)
+
+
+micro_envfit <- envfit(
+  centroids_env[, c("PC1", "PC2")],
+  centroids_env[, env_vars],
+  na.rm = TRUE,
+  permutations = 9999)
+
+micro_envfit
+
+env_scores_micro <- as.data.frame(micro_envfit$vectors$arrows * sqrt(micro_envfit$vectors$r))
+
+env_scores_micro$var <- rownames(env_scores_micro)
+
+env_scores_micro$label <- dplyr::recode(
+  env_scores_micro$var,
+  mean_o2 = "DO",
+  mean_salinity = "Salinity",
+  mean_turbidity = "Turbidity",
+  mean_depth = "Depth",
+  mean.seasonal.amp = "Seasonal~amp.",
+  mean.daily.amp = "Daily~amp.",
+  DLI = "PAR~dose",
+  Fluor = "Fluor.",
+  O2_amp = "DO~amp.",)
+```
+
+```{r}
+env_scores_micro <- env_scores_micro %>%
+  mutate(
+    arrow_x = PC1 * 1.4,
+    arrow_y = PC2 * 1.4,
+    label_x = PC1 * 1.6,
+    label_y = PC2 * 1.6)
+
+
+env_inset_micro <- ggplot() +
+  geom_hline(yintercept = 0,linetype = 2,alpha = 0.5,color = "gray50") +
+  geom_vline(xintercept = 0,linetype = 2,alpha = 0.5,color = "gray50") +
+  geom_segment(
+    data = env_scores_micro,
+    aes(x = 0, y = 0, xend = arrow_x, yend = arrow_y),
+    arrow = arrow(length = unit(0.2, "lines")),
+    color = "black",
+    alpha = 0.9) +
+  geom_text_repel(data = env_scores_micro,aes(x = label_x, y = label_y, label = label),size = 5,color = "black",box.padding = 0.25, point.padding = 0.15,force = 5,force_pull = 0.2,max.overlaps = Inf,segment.color = NA,seed = 123,parse = TRUE) +
+  theme_classic() +
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = "black"),
+    panel.border = element_rect(color = "black", fill = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+    legend.position = "none")
+
+env_inset_micro
+
+```
+
+##beta dispersion
+```{r}
+dist_clr <- dist(otu_clr, method = "euclidean")
+
+# Grouping variable for centroid distances
+group_var <- sample_data(ps_s22_fam)$Origin 
+# Run beta dispersion analysis
+bd_micro <- betadisper(dist_clr, group_var)
+
+distances_df_micro <- data.frame(
+  DistanceToCentroidMicro = bd_micro$distances,
+  Origin = group_var)
+
+bd_perm <- permutest(bd_micro, permutations = 9999)  # global test
+bd_perm
+#beta dispersion is not significant 
+
+
+TukeyHSD(bd_micro)
+
+```
+```{r}
+
+distances_df_micro$Origin <- factor(distances_df_micro$Origin, levels = c(
+  "Harry's Bommie", 
+  "Fourth Point", 
+  "Deep Lagoon", 
+  "Shallow Lagoon", 
+  "Reef Crest", 
+  "Reef Flat"))
+
+
+p_dist <- ggplot(distances_df_micro, aes(x = Origin, y = DistanceToCentroidMicro, fill = Origin)) +
+  geom_boxplot(width = .5, outlier.shape = NA, alpha = 0.8, size = 1) +
+    geom_jitter(width = 0.15, size = 4, alpha = 0.8, 
+    shape = 21,stroke = 0.7) +
+  scale_fill_manual(values = site_colors_micro,   name = "Site",labels = c(
+      "Harry's Bommie" = "HB",
+      "Fourth Point" = "FP",
+      "Deep Lagoon" = "DL",
+      "Shallow Lagoon" = "SL",
+      "Reef Crest" = "RC",
+      "Reef Flat" = "RF")) +
+  scale_x_discrete(labels = c(
+    "Harry's Bommie" = "HB",
+    "Fourth Point" = "FP",
+    "Deep Lagoon" = "DL",
+    "Shallow Lagoon" = "SL",
+    "Reef Crest" = "RC",
+    "Reef Flat" = "RF")) +
+  scale_y_continuous(n.breaks = 8) +
+  theme_classic() +
+  theme(
+    axis.text.x  = element_text(size =18),
+    axis.text.y = element_text(size = 18),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    panel.background = element_rect(fill = NA, color = "black"),
+    legend.title = element_text(face = "bold", size = 16),
+    legend.text = element_text(size = 12),
+    #legend.position = "none"
+  ) + labs(x = "Site", y = "Distance to\ncentroid")
+p_dist
+```
+#FIGURE 5
+```{r}
+
+legend_shared <- get_legend(
+  shannon_div +
+    theme(
+      legend.position = "right",
+      legend.title = element_text(size = 16, face = "bold"),
+      legend.text = element_text(size = 14)))
+
+shannon_div <- shannon_div + theme(legend.position = "none")
+pdist   <- p_dist + theme(legend.position = "none")
+
+left_bottom <- plot_grid(
+  p_pca_centroids,
+  env_inset_micro,
+  ncol = 2,
+  rel_widths = c(1.8, 0.9),
+  labels = c("B", "C"),
+  label_size = 18,
+  label_fontface = "bold",
+  label_x = c(0, -0.05),
+  label_y = c(1, 1),
+  hjust = -0.5,
+  vjust = 1.5,
+  align = "h"
+)
+
+right_plots <- plot_grid(
+  shannon_div,
+  pdist,
+  ncol = 1,
+  labels = c("D", "E"),
+  label_size = 18,
+  label_fontface = "bold",
+  rel_heights = c(1, 1),
+  align = "v"
+)
+
+right_bottom <- plot_grid(
+  right_plots,
+  legend_shared,
+  ncol = 2,
+  rel_widths = c(1, 0.35)
+)
+
+bottom_row <- plot_grid(
+  left_bottom,
+  right_bottom,
+  ncol = 2,
+  rel_widths = c(3.8, 1.2),
+  align = "h"
+)
+
+micro_full_fig <- plot_grid(
+  relative_plot_fam,
+  bottom_row,
+  ncol = 1,
+  rel_heights = c(1.3, 2.2),
+  labels = c("A", ""),
+  label_size = 18,
+  label_fontface = "bold"
+)
+
+micro_full_fig
+
+```
+
+#Spearman Correlations
+##overall phys x microbe
+```{r}
+phys22 <- read.csv("C:/Users/marce/Desktop/Heron/CHOP_Heron_Jan2025/PBR_pre_data.csv")
+rownames(phys22) <- phys22$SampleID
+head(phys22)
+
+sample_data_22 <- sample_data(ps_s22_rel_fam)  #using family level relative abundance 
+
+# Replace row names with the SampleID
+sample_names(ps_s22_rel_fam) <- sample_data_22$SampleID
+
+ps_s22_clr_fam <- microbiome::transform(ps_s22_rel_fam, "clr")
+
+# Extract CLR-transformed abundance table as data frame
+otu_fam <- as.data.frame(otu_table(ps_s22_clr_fam))
+
+# Verify that samples are rows and families are columns
+if (taxa_are_rows(ps_s22_clr_fam)) {
+  otu_fam <- t(otu_fam)
+}
+head(otu_fam)
+
+# Optional: check distribution / sanity of transformed values
+summary(otu_fam[, 1:5])
+
+
+```
+```{r}
+merged_data <- merge(otu_fam, phys22, by = "row.names", all = TRUE)
+rownames(merged_data) <- merged_data$Row.names
+merged_data <- merged_data[, -1]  # Remove Row.names column
+
+# View the merged data
+head(merged_data)
+numeric_data <- merged_data[sapply(merged_data, is.numeric)]
+
+# Check the structure of the numeric data to ensure it's all numeric
+str(numeric_data)
+
+
+taxa_sums <- colSums(otu_fam)
+
+# Get the top 30
+top30_taxa <- names(sort(taxa_sums, decreasing = TRUE))[1:30]
+
+# Subset the OTU table to these top 30 taxa
+otu_top30 <- otu_fam[, top30_taxa]
+
+merged_top30 <- merge(otu_top30, phys22, by = "row.names", all = FALSE)
+rownames(merged_top30) <- merged_top30$Row.names
+merged_top30 <- merged_top30[, -1]  # Remove Row.names column
+numeric_top30 <- merged_top30[sapply(merged_top30, is.numeric)]
+
+```
+```{r}
+
+correlation_matrix <- cor(numeric_data, method = "spearman", use = "pairwise.complete.obs")
+```
+```{r}
+melted_corr <- reshape2::melt(correlation_matrix)
+```
+```{r}
+
+taxa_sums <- colSums(otu_fam)
+top30_taxa <- names(sort(taxa_sums, decreasing = TRUE))[1:30]
+
+# Subset the OTU table to these top 30 taxa
+otu_top30 <- otu_fam[, top30_taxa]
+
+merged_top30 <- merge(otu_top30, phys22, by = "row.names", all = FALSE)
+rownames(merged_top30) <- merged_top30$Row.names
+merged_top30 <- merged_top30[, -1]  # Remove Row.names column
+
+numeric_top30 <- merged_top30[sapply(merged_top30, is.numeric)]
+
+# Create correlation matrix
+cor_matrix_top30 <- cor(numeric_top30, method = "spearman", use = "pairwise.complete.obs")
+
+melted_corr_top30 <- reshape2::melt(cor_matrix_top30)
+
+# Plot heatmap
+# ggplot(data = melted_corr_top30, aes(Var1, Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+#   theme_minimal() +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   labs(title = "Correlation Matrix: Top 30 Taxa + Physiology", x = "Variables", y = "Variables")
+
+
+```
+
+```{r}
+dist_mat <- as.dist(1 - cor_matrix_top30)
+
+# Hierarchical clustering
+hc <- hclust(dist_mat)
+
+# Get the order of variables
+ordered_vars <- hc$labels[hc$order]
+
+# Apply that to the melted dataframe
+melted_corr_top30$Var1 <- factor(melted_corr_top30$Var1, levels = ordered_vars)
+melted_corr_top30$Var2 <- factor(melted_corr_top30$Var2, levels = ordered_vars)
+
+# Plot
+# ggplot(data = melted_corr_top30, aes(Var1, Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+#   theme_minimal() +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   labs(title = "Clustered Correlation Matrix", x = "Variables", y = "Variables")
+
+```
+
+```{r}
+#Create ASV -> Family mapping
+tax_df <- as.data.frame(tax_table(ps_s22_rel_fam))
+tax_df$ASV <- rownames(tax_df)
+tax_df$Family[is.na(tax_df$Family)] <- "Unclassified_Family"
+tax_df$Family_Labeled <- make.unique(tax_df$Family)
+asv_to_family <- setNames(tax_df$Family_Labeled, tax_df$ASV)
+
+```
+
+##unclustered
+```{r}
+phys_vars <- colnames(phys22)[sapply(phys22, is.numeric)]
+microbe_vars <- colnames(otu_top30)[1:30]  
+
+microbe_family_names <- asv_to_family[microbe_vars]
+
+# Subset the correlation matrix
+cor_subset <- cor_matrix_top30[phys_vars, microbe_vars]
+
+
+cor_subset <- cor_matrix_top30[phys_vars, microbe_vars]
+colnames(cor_subset) <- microbe_family_names
+# Melt the matrix for ggplot
+melted_subset <- reshape2::melt(cor_subset)
+
+# Plot with phys on y and microbe on x
+ggplot(data = melted_subset, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Physiology vs Top 30 Microbiome Correlations", x = "Microbiome Taxa", y = "Physiological Variables")
+```
+
+##clustered
+```{r}
+phys_vars <- colnames(phys22)[sapply(phys22, is.numeric)]
+microbe_vars <- colnames(otu_top30)[1:30]
+microbe_family_names <- asv_to_family[microbe_vars]
+
+common_samples <- intersect(rownames(phys22), rownames(otu_top30))
+
+merged_df <- cbind(
+  phys22[common_samples, phys_vars],
+  otu_top30[common_samples, microbe_vars]
+)
+rcorr_res <- rcorr(as.matrix(merged_df), type = "spearman")
+
+cor_subset <- rcorr_res$r[phys_vars, microbe_vars, drop = FALSE]
+pval_subset <- rcorr_res$P[phys_vars, microbe_vars, drop = FALSE]
+
+colnames(cor_subset) <- microbe_family_names[colnames(cor_subset)]
+colnames(pval_subset) <- microbe_family_names[colnames(pval_subset)]
+
+row_order <- hclust(as.dist(1 - cor(t(cor_subset))))$order
+col_order <- hclust(as.dist(1 - cor(cor_subset)))$order
+
+cor_clustered <- cor_subset[row_order, col_order, drop = FALSE]
+pval_clustered <- pval_subset[row_order, col_order, drop = FALSE]
+
+melted_cor <- reshape2::melt(cor_clustered)
+melted_pval <- reshape2::melt(pval_clustered)
+
+melted_cor$stars <- cut(melted_pval$value,
+                        breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+                        labels = c("***", "**", "*", ""),
+                        right = FALSE)
+
+pretty_phys_labels <- c(
+  "pre_protein" = "Host protein",
+  "pre_AFDW" = "Total biomass",
+  "pre_chlor" = "Chlorophyll a",
+  "pre_symb" = "Symbiont density",
+  "pre_poc" = "Pocilloporin",
+  "pre_MG" = "Mycosporine-glycine",
+  "Fv.Fm" = "Fv/Fm",
+  "ED50" = "Thermal tolerance (ED50)",
+  "pre_den" = "Skeletal density")
+
+ combined_site_corr_plot <- ggplot(data = melted_cor, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, vjust = 0.5, hjust = 0.5) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, name = "Correlation") +
+  scale_y_discrete(labels = pretty_phys_labels) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 16), axis.title.x = element_text(size=16), axis.title.y = element_text(size=16), legend.title = element_text(size = 16),legend.text  = element_text(size = 16)) +
+  labs(x = "Microbial family", y = "Physiological variable")
+ 
+combined_site_corr_plot 
+
+```
+
+##Individual Sites - Unclustered 
+###FP
+```{r}
+site <- "FP"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+# Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm"      # Photochemical efficiency
+  
+  
+)
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+FP_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold",color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  coord_equal() +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(title = "Fourth Point", fill = "Correlation")
+
+FP_unclust
+
+```
+###RF
+```{r}
+site <- "RF"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+## Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm"      # Photochemical efficiency
+  
+  
+)
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+RF_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold", color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  theme_minimal() +
+  coord_equal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 16, face = "bold"),
+    axis.title.y = element_blank(),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(
+    title = "Reef Flat",
+    x = "Microbial Family",
+    fill = "Correlation"
+  )
+
+RF_unclust
+
+```
+###HB
+```{r}
+site <- "HB"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+# Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm"      # Photochemical efficiency
+  
+  
+)
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+HB_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold", color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  coord_equal() +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(title = "Harry's Bommie", fill = "Correlation")
+
+HB_unclust
+
+```
+###SL
+```{r}
+
+site <- "SL"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+# Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm"      # Photochemical efficiency
+  
+  
+)
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+SL_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold", color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  coord_equal() +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(title = "Shallow Lagoon", fill = "Correlation")
+
+SL_unclust
+
+
+```
+###RC
+```{r}
+site <- "RC"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+# Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm"      # Photochemical efficiency
+  
+  
+)
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+RC_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold", color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  coord_equal() +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(title = "Reef Crest", fill = "Correlation")
+
+RC_unclust
+
+```
+###DL
+```{r}
+site <- "DL"
+
+# Subset phys and micro data
+site_phys <- phys22[phys22$Origin == site, ]
+site_micro <- otu_top30[rownames(otu_top30) %in% rownames(site_phys), microbe_vars, drop = FALSE]
+
+# Merge data
+merged_site <- merge(site_phys, site_micro, by = "row.names")
+rownames(merged_site) <- merged_site$Row.names
+merged_site <- merged_site[, !(names(merged_site) %in% "Row.names")]
+
+# Keep numeric only
+merged_numeric <- merged_site[, sapply(merged_site, is.numeric)]
+
+# Correlation matrix and p-values
+rcorr_res <- rcorr(as.matrix(merged_numeric), type = "spearman")
+cor_site <- rcorr_res$r
+pval_site <- rcorr_res$P
+
+# Subset to phys × microbes
+available_phys <- intersect(phys_vars, rownames(cor_site))
+available_microbes <- intersect(microbe_vars, colnames(cor_site))
+
+cor_subset_site <- cor_site[available_phys, available_microbes, drop = FALSE]
+pval_subset_site <- pval_site[available_phys, available_microbes, drop = FALSE]
+
+# Rename microbial columns to family names
+colnames(cor_subset_site) <- microbe_family_names[available_microbes]
+colnames(pval_subset_site) <- microbe_family_names[available_microbes]
+
+# Drop one physiological variable
+cor_subset_site <- cor_subset_site[rownames(cor_subset_site) != "ED50", , drop = FALSE]
+pval_subset_site <- pval_subset_site[rownames(pval_subset_site) != "ED50", , drop = FALSE]
+
+# Keep only physiological rows with at least one significant correlation - comment out if you want the full matrix
+sig_rows <- rownames(pval_subset_site)[apply(pval_subset_site < 0.05, 1, any, na.rm = TRUE)]
+
+cor_subset_site <- cor_subset_site[sig_rows, , drop = FALSE]
+pval_subset_site <- pval_subset_site[sig_rows, , drop = FALSE]
+
+# Melt matrices
+melted_site <- reshape2::melt(cor_subset_site)
+melted_pval <- reshape2::melt(pval_subset_site)
+melted_site$pval <- melted_pval$value
+
+# Add significance stars
+melted_site$stars <- cut(
+  melted_site$pval,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, 1),
+  labels = c("***", "**", "*", ""),
+  right = FALSE
+)
+
+# Custom Y-axis order
+custom_order <- c(
+  "pre_den",      # Skeletal Density
+  "pre_AFDW",    # Total Biomass
+  "pre_protein", # Host Protein
+  "pre_poc",     # Pocilloporin
+  "pre_MG",     # Mycosporine-glycine
+  "pre_symb",    # Symbiont Density
+  "pre_chlor",   # Chlorophyll a
+  "Fv.Fm")      # Photochemical efficiency
+
+# Keep only rows still present after filtering for sig rows - comment out if you want the full matrix
+custom_order <- custom_order[custom_order %in% rownames(cor_subset_site)]
+
+melted_site$Var1 <- factor(melted_site$Var1, levels = rev(custom_order))
+melted_site$Var2 <- factor(melted_site$Var2, levels = colnames(cor_subset_site))  # lock x-axis too
+
+# Plot
+DL_unclust <- ggplot(data = melted_site, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "gray90") +
+  geom_text(aes(label = stars), size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,color = "black", na.rm = TRUE) +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limits = c(-1, 1)
+  ) +
+  coord_equal() +
+  scale_y_discrete(labels = function(x) parse(text = pretty_phys_labels[x])) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold")
+  ) +
+  labs(title = "Deep Lagoon", fill = "Correlation")
+
+DL_unclust
+
+```
+#FIGURE 6
+```{r}
+library('ggpubr')
+
+layout <- "
+A
+B
+C
+D
+E
+F
+"
+
+combined_plot_7_V2 <- (
+  HB_unclust + FP_unclust + DL_unclust + SL_unclust + RC_unclust + RF_unclust) +
+  plot_layout(design = layout, guides = "collect") + plot_annotation(tag_levels = 'A') &
+  theme(
+    plot.tag = element_text(size = 16, face = "bold")
+  )
+combined_plot_7_V2
+
+```
