@@ -1,0 +1,807 @@
+---
+title: ITS2 sequence analysis
+author: "MP Martynek"
+date: '2025'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  pdf_document:
+    keep_tex: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+Set up workspace, set options, and load required packages.    
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+ITS2 strain variation data analysis based on scripts from Ariana Huffmyer, University of Washington and Shayle Matsuda, Shedd Aquarium.   
+
+```{r}
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("readxl")) install.packages("readxl")
+if (!require("phyloseq")) BiocManager::install("phyloseq")
+if (!require("janitor")) install.packages("janitor")
+if (!require("writexl")) install.packages("writexl")
+#if (!require("microViz")) BiocManager::install("microViz")
+
+library("readxl")
+library("phyloseq")
+library("janitor")
+library("writexl")
+library("ggplot2")
+library('cowplot')
+library("janitor")
+library("car")
+library("phyloseq")
+library("stringr")
+library("ape")
+library("DESeq2")
+#library("microViz")
+library("vegan")
+library("ComplexHeatmap")
+library("tidyverse")
+library("dplyr")
+library(emmeans)
+library(readxl)
+```
+
+# **Prepare data**  
+
+Load metadata.  
+```{r}
+#create metadata and load
+metadata <- read.csv("ITS2/SymPortal_datasheet_Martynek.csv", header = TRUE, sep = ",")%>%dplyr::select(sample_name, collection_depth, origin, timepoint)
+
+remove <- c("26", "27", "43", "44","233", "234", "235", "236", "237", "238", "239", "240", "243", "244", "247", "248" )
+
+metadata <- metadata %>%
+  filter(!sample_name %in% remove)
+
+rownames(metadata) <- metadata$sample_name
+
+metadata <- as.matrix(metadata)
+metadata <- sample_data(data.frame(metadata))
+```
+
+Load the data for strain level information.  
+
+```{r}
+#gather the taxonomy names  
+taxnames <- read_tsv(
+  file  = "ITS2/638_20251021T051401_DBV_20251021T231108.seqs.absolute.abund_only.txt",
+  n_max = 0) %>%
+  select(-1) %>%
+  names(.)
+
+#extract clade letter  
+tax0 <- data_frame(
+  DIV = taxnames,
+  clade = str_extract(DIV, "[A-Z]")
+)
+
+tax1 <- as.matrix(tax0)
+rownames(tax1) <- tax0$DIV
+tax <- tax_table(tax1)
+
+otu0 <- read_tsv(
+  file  = "ITS2/638_20251021T051401_DBV_20251021T231108.seqs.absolute.abund_and_meta.txt") %>%
+  select(-1, )
+
+otu1 <- as.matrix(otu0[, 39:116])
+rownames(otu1) <- otu0$sample_name
+otu <- otu_table(otu1, taxa_are_rows = FALSE)
+
+coralDIV <- phyloseq(otu, tax, metadata)
+coralDIV
+```
+
+# **Build DIV Data**  
+
+View the number of sequence counts in our dataset.   
+```{r}
+samps<-read_tsv(file  = "ITS2/638_20251021T051401_DBV_20251021T231108.seqs.absolute.abund_and_meta.txt")%>%select(post_taxa_id_absolute_symbiodiniaceae_seqs, sample_name)
+
+hist(samps$post_taxa_id_absolute_symbiodiniaceae_seqs, breaks=20)
+
+samps
+```
+We have >85K for most samples. DL03, SL10, FP04, FP09 which have about 60K. Note that these samples also had distinct type profiles from all other samples too 
+
+Plot tree.  
+```{r}
+random_tree = rtree(ntaxa(coralDIV), rooted=TRUE, tip.label=taxa_names(coralDIV))
+plot(random_tree)
+```
+
+Merge phyloseq data. 
+```{r}
+phylo_coral_DIV = merge_phyloseq(coralDIV, metadata, random_tree)
+phylo_coral_DIV
+```
+
+Filter out samples with low numbers in groups (n=1 per group) from phyloseq object.  
+```{r}
+phylo_coral_DIV <- subset_samples(
+  phylo_coral_DIV,
+  !(sample_name %in% c("DL03", "SL10", "FP04", "FP09"))
+)
+
+sample_data(phylo_coral_DIV)$origin <- factor(
+  sample_data(phylo_coral_DIV)$origin,
+  levels = c("HB", "FP", "DL", "SL", "RC", "RF")  
+)
+```
+
+We now have 173 samples. 
+
+Now build a tree with the combined data.  
+```{r}
+plot_tree(phylo_coral_DIV, color="origin", label.tips="taxa_names", ladderize="left", plot.margin=0.3)
+```
+
+Plot a heatmap.  
+
+```{r}
+plot_heatmap(phylo_coral_DIV, "NMDS", "bray", "origin", low="#66CCFF", high="#000033", na.value="white")
+```
+
+Assign object to a shorter name. 
+
+```{r}
+GP1 = phylo_coral_DIV
+GP1
+```
+
+Display smaple sequencing depth. 
+```{r}
+min(sample_sums(GP1))
+```
+
+Transform to relative abundance and subsample to even sampling depth to minimum count in dataset \
+```{r}
+GP1_rare<-rarefy_even_depth(GP1, sample.size = min(sample_sums(GP1)),
+  rngseed = TRUE, replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+```
+
+View sample sequencing depth again after subsampling. 
+```{r}
+sample_sums(GP1_rare)
+```
+
+All samples are now at 58,487 sequences. 17 OTU's removed. 
+
+Now transform counts to relative abundance expressed as a proportion.    
+
+```{r}
+#GP1_rare = transform_sample_counts(GP1_rare, function(x) 100 * x/sum(x))
+GP1_rare = transform_sample_counts(GP1_rare, function(x) x/sum(x))
+```
+
+View tree and heatmap after subsampling.   
+```{r}
+plot_tree(GP1_rare, color="origin", label.tips="taxa_names", ladderize="left", plot.margin=0.3)
+plot_heatmap(GP1_rare, "NMDS", "bray", "origin", low="#66CCFF", high="#000033", na.value="white")
+```
+
+# **DIV Ordinations: NMDS** 
+
+View NMDS ordination by OTU.    
+```{r}
+GP.ord <- ordinate(GP1_rare, "NMDS", "bray")
+ordinate(GP1_rare, "NMDS", "bray")
+p1 = plot_ordination(GP1_rare, GP.ord, type="taxa", title="taxa")
+p1
+```
+
+Plot with samples now.  
+```{r}
+p2 = plot_ordination(GP1_rare, GP.ord, type="samples", color="origin") 
+p2_geom<- p2 + geom_polygon(aes(fill=origin)) + geom_point(size=4) + ggtitle("samples")
+p2_geom
+```
+
+View PCoA by OTU.  
+```{r}
+GP.ordb.pcoa <- ordinate(GP1_rare, "PCoA", "bray")
+p1b = plot_ordination(GP1_rare, GP.ordb.pcoa, type="taxa", title="taxa")
+p1b
+```
+
+Plot with samples now.  
+```{r}
+p2b = plot_ordination(GP1_rare, GP.ord, type="samples", color="origin"); p2b 
+```
+
+Output NMDS plot for visualization.  
+```{r}
+Origin_names<-c("Harry's Bommie", "Fourth Point", "Deep Lagoon", "Shallow Lagoon", "Reef Crest", "Reef Flat")
+
+p2b_viz<-p2  + 
+  geom_point(aes(colour=origin), size=4) + 
+  ggtitle("NMDS")+
+  scale_colour_manual(name="Origin", values=c("#131142FF","dodgerblue2", "steelblue1", "brown1", "#C1000e", "violetred" ), labels=Origin_names) + ggtitle("A")+
+  theme_classic() + 
+  theme(
+    panel.background=element_blank()
+  ); p2b_viz
+
+#ggsave(plot=p2b_viz, "figures/its2/nmds_its2_div.jpeg", h=5, w=6)
+```
+
+Conduct a permanova in the vegan package.  
+
+```{r}
+metadata <- as(sample_data(GP1_rare), "data.frame")
+
+perm1<-adonis2(phyloseq::distance(GP1_rare, method="bray") ~ origin,
+       data = metadata)
+
+perm1
+```
+
+Permutation test for adonis under reduced model
+Permutation: free
+Number of permutations: 999
+
+adonis2(formula = phyloseq::distance(GP1_rare, method = "bray") ~ origin, data = metadata)
+          Df SumOfSqs      R2      F Pr(>F)    
+Model      5  0.40171 0.17875 7.2699  0.001 ***
+Residual 167  1.84555 0.82125                  
+Total    172  2.24726 1.00000                  
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1   
+
+# **Plot heat map of ITS2 DIVs**  
+
+Draw with Phyloseq.  
+
+Filter out taxa that comprise <1% mean relative abundance across samples. 
+
+There were 61 OTU's before filtering and 16 after filtering. This indicates there were many rare taxa.   
+```{r}
+GP1_rare
+
+GP1_prune = filter_taxa(GP1_rare, function(x) mean(x) > 0.01, TRUE)
+GP1_prune 
+
+#sample_order<-c("R55", "R56", "R57", "R58", "R59", "R60", "R61", "R62", "R63", "R64", "R65", "R66", "R67", "R68", "R69", "R71", "R72")
+
+p<-plot_heatmap(GP1_prune, sample.label="origin", low="#66CCFF", high="#000033", na.value="white", taxa.label="DIV")
+p$scales$scales[[1]]$name <- "Origin"
+
+print(p)
+
+#ggplot2::ggsave("Mcap2020/Figures/ITS2/div_heatmap.jpg", p, width = 6, height = 6)
+```
+
+Run the NMDS visualization again with the dataset with rare samples removed. Run a PERMANOVA.  
+
+```{r}
+GP.ordb.filt <- ordinate(GP1_prune, "NMDS", "bray")
+
+p3b = plot_ordination(GP1_prune, GP.ordb.filt, type="samples", color="origin"); p3b 
+
+p3b_viz_filt<-p3b  + 
+  geom_point(aes(colour=origin), size=4) + 
+  ggtitle("NMDS")+
+  scale_colour_manual(name="Origin", values=c("#131142FF","dodgerblue2", "steelblue1", "brown1", "#C1000e", "violetred" ), labels=Origin_names)+
+  theme_classic() + 
+  ggtitle("A")+
+  theme(
+    panel.background=element_blank()
+  ); p3b_viz_filt
+
+#ggsave(plot=p3b_viz_filt, "figures/its2/nmds_its2_div_filtered.jpeg", h=5, w=6)
+```
+
+Run PERMANOVA on filtered data set. 
+```{r}
+metadata_filt <- as(sample_data(GP1_prune), "data.frame")
+
+perm2_filt<-adonis2(phyloseq::distance(GP1_prune, method="bray") ~ origin,
+       data = metadata_filt)
+
+perm2_filt
+```
+
+Permutation test for adonis under reduced model
+Permutation: free
+Number of permutations: 999
+
+adonis2(formula = phyloseq::distance(GP1_prune, method = "bray") ~ origin, data = metadata_filt)
+          Df SumOfSqs      R2      F Pr(>F)    
+Model      5  0.14247 0.12681 4.8506  0.001 ***
+Residual 167  0.98102 0.87319                  
+Total    172  1.12349 1.00000                  
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Draw by origin ih Complex Heatmap.  
+```{r}
+# library(dendsort)
+# library(WGCNA)
+# library(circlize)
+# 
+# table<-as.matrix(t(otu_table(GP1_prune)))
+#                  
+# row_dend = dendsort(hclust(dist(table)))
+# col_dend = dendsort(hclust(dist(t(table))))
+# 
+# #col_fun = colorRamp2(c(0, 50, 100), c("white", "darkgray", "black"))
+# col_fun = colorRamp2(c(0, .1, .25, .5), hcl_palette = "Blue-Red 3")
+# 
+# #pdf(file = "figures/its2/DIV-ComplexHeatmap.pdf", height = 7, width = 7)
+# ComplexHeatmap::Heatmap(table, name = "Relative \nAbundance", row_title = "DIV", column_title = "ITS2 DIV Relative Abundance (>1%)", 
+#         col = col_fun, 
+#         row_names_side = "left", 
+#         row_dend_side = "left",
+#         width = unit(4, "in"), 
+#         height = unit(4, "in"), 
+#         column_dend_height = unit(.5, "in"),
+#         row_dend_width = unit(.5, "in"),
+#         column_dend_reorder = FALSE,
+#         row_dend_reorder = TRUE,
+#         row_gap = unit(2.5, "mm"),
+#         clustering_distance_rows = "euclidean",
+#         clustering_method_rows = "complete",
+#         border = TRUE, 
+#         column_names_gp =  gpar(fontsize = 12, border=FALSE),
+#         column_names_rot = 35,
+#         cluster_rows = row_dend, 
+#         cluster_columns = col_dend,
+#         column_order = sample_order, 
+#         row_names_gp = gpar(fontsize = 12, alpha = 0.75, border = FALSE))
+# dev.off()
+
+```
+
+# **Alpha Diversity**  
+
+Calculate diversity of those that have more than 1 sequence (no singletons).
+```{r}
+GP1_rare_untransformed<-rarefy_even_depth(GP1, sample.size = min(sample_sums(GP1)),
+  rngseed = TRUE, replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+
+GP2 <- prune_taxa(taxa_sums(GP1_rare_untransformed) > 1, GP1_rare_untransformed)
+```
+
+Plot all richness metrics.  
+```{r}
+plot_richness(GP2)
+```
+
+Plot the two most commonly used - Shannon and Inverse Simpson.  
+```{r}
+alpha_df <- estimate_richness(GP2, measures = c("InvSimpson", "Shannon"))
+
+# 2. Add origin info
+alpha_df$origin <- sample_data(GP2)$origin
+alpha_df$timepoint <- factor(sample_data(GP2)$timepoint,
+                             levels = c("Sept_2022", "May_2024", "Sept_2024"))
+
+# 3. Pivot longer so we have a column "variable" and "value"
+alpha_long <- alpha_df %>%
+  pivot_longer(cols = c("InvSimpson", "Shannon"),
+               names_to = "variable",
+               values_to = "value")
+
+# 4. Plot
+alpha1_plot <- ggplot(alpha_long, aes(x = origin, y = value, color = origin, shape = timepoint)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.6), size = 3, alpha = 0.8) +
+  facet_wrap(~variable, scales = "free_y") +
+  theme_classic() +
+  scale_color_manual(values=c("#131142FF","dodgerblue2","steelblue1",
+                              "brown1","#C1000e","violetred")) +
+  theme(axis.text.x = element_text(angle=45, hjust=1, color="black"),
+        axis.title.x = element_blank())
+
+alpha1_plot
+
+#ggsave(plot=alpha1_plot, file="figures/its2/alpha_rare.png", width=7, height=5)
+```
+
+Test for differences in alpha diversity.  
+```{r}
+metadata <- as(sample_data(GP2), "data.frame")
+metadata$sample<-rownames(metadata)
+
+alpha_rare<-estimate_richness(GP2, measures=c("InvSimpson", "Shannon", "Chao1"))
+alpha_rare$sample<-rownames(alpha_rare)
+
+alpha_rare<-full_join(metadata, alpha_rare, by="sample")
+
+summary(aov(Shannon~origin, data=alpha_rare))
+summary(aov(InvSimpson~origin, data=alpha_rare))
+summary(aov(Chao1~origin, data=alpha_rare))
+```
+
+
+# **Plot profile level information** 
+
+Load profile level data.  
+```{r}
+#create metadata and load
+metadata <- read.csv("ITS2/SymPortal_datasheet_Martynek.csv", header = TRUE, sep = ",")%>%dplyr::select(sample_name, collection_depth, origin, timepoint)
+
+remove <- c("26", "27", "43", "44","233", "234", "235", "236", "237", "238", "239", "240", "243", "244", "247", "248" )
+
+metadata <- metadata %>%
+  filter(!sample_name %in% remove)
+
+rownames(metadata) <- metadata$sample_name
+
+metadata <- as.matrix(metadata)
+metadata <- sample_data(data.frame(metadata))
+
+#load data for taxonomy
+tax0 <- read_tsv(
+  file  = "ITS2/638_20251021T051401_DBV_20251021T231108.profiles.absolute.abund_and_meta.txt", n_max = 6) %>%
+  dplyr::select(-2) %>% 
+  gather(uid, value, -1) %>% 
+  spread(1, value) %>%
+  clean_names()
+
+tax1 <- as.matrix(tax0[, -1], dimnames = list(tax0$uid, colnames(tax0[-1])))
+rownames(tax1) <- tax0$uid
+tax <- tax_table(tax1)
+
+#load data for count matrix 
+otu0 <- read_tsv(
+  file  = "ITS2/638_20251021T051401_DBV_20251021T231108.profiles.absolute.abund_and_meta.txt", col_names = TRUE) 
+
+list<-c("UID", "sample_name", "1585934", "1586098", "1587534", "1586603", "1585960", "1585391", "1586361", "1587514", "1586753", "1588633", "1588394", "1585393", "1585933", "1587213", "1586587", "1589029", "1586365", "1587322", "1591001", "1590984")
+colnames(otu0)<-list
+
+otu0<-otu0%>%
+  select(-1) %>%
+  #dplyr::slice(7:24)
+  mutate_at(2:ncol(.), as.numeric)
+
+otu1 <- as.matrix(otu0[, -1])
+rownames(otu1) <- otu0$sample_name
+otu <- otu_table(otu1, taxa_are_rows = FALSE)
+
+taxa_names(otu)
+taxa_names(tax)
+
+#combine to phyloseq object
+coral <- phyloseq(otu, tax, metadata)
+coral
+```
+
+Create tree.  
+```{r}
+random_tree_profile = rtree(ntaxa(coral), rooted=TRUE, tip.label=taxa_names(coral))
+```
+
+Merge phyloseq data. 
+```{r}
+phylo_coral = merge_phyloseq(coral, metadata, random_tree_profile)
+phylo_coral
+```
+
+Filter out samples with low numbers in groups from phyloseq object.  
+```{r}
+phylo_coral_DIV <- subset_samples(
+  phylo_coral_DIV,
+  !(sample_name %in% c("DL03", "SL10", "FP04", "FP09"))
+)
+
+sample_data(phylo_coral_DIV)$origin <- factor(
+  sample_data(phylo_coral_DIV)$origin,
+  levels = c("HB", "FP", "DL", "SL", "RC", "RF")  
+)
+```
+
+Now build a tree with the combined data.  
+```{r}
+plot_tree(phylo_coral, color="origin", label.tips="taxa_names", ladderize="left", plot.margin=0.3)
+```
+
+Plot a heatmap.  
+
+```{r}
+plot_heatmap(phylo_coral, "NMDS", "bray", "origin", low="#66CCFF", high="#000033", na.value="white")
+```
+
+Plot ordinations.  
+
+```{r}
+GP1_profile = phylo_coral
+GP1_profile
+```
+
+
+```{r}
+min(sample_sums(GP1_profile))
+
+GP1_rare_profile<-rarefy_even_depth(GP1_profile, sample.size = min(sample_sums(GP1_profile)),
+  rngseed = TRUE, replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+
+sample_sums(GP1_rare_profile)
+```
+All samples now have 38483 sequences. 
+
+Transform to relative abundance as a proportion. 
+```{r}
+GP1_rare_profile = transform_sample_counts(GP1_rare_profile, function(x) x/sum(x))
+
+GP1_profile = transform_sample_counts(GP1_profile, function(x) x/sum(x))
+```
+
+View tree and heatmap after subsampling  
+```{r}
+plot_tree(GP1_rare_profile, color="origin", label.tips="taxa_names", ladderize="left", plot.margin=0.3)
+plot_heatmap(GP1_rare_profile, "NMDS", "bray", "origin", low="#66CCFF", high="#000033", na.value="white")
+```
+
+Plot abundance of each profile across origins
+#Fig 4
+```{r}
+
+library(wesanderson)
+
+GP1_S22 <- subset_samples(GP1_profile, timepoint == "Sept_2022")
+
+samples_to_remove <- c("DL06", "FP04")
+
+GP1_S22 <- subset_samples(GP1_S22, !(sample_names(GP1_S22) %in% samples_to_remove))
+
+GP1_S22 <- prune_taxa(taxa_sums(GP1_S22) > 0, GP1_S22)
+
+
+sample_data(GP1_S22)$origin <- factor(
+  sample_data(GP1_S22)$origin,
+  levels = c("HB", "FP", "DL", "SL", "RC", "RF")
+)
+
+Origin_names <- c(HB = "Harry’s Bommie",
+                  FP = "Fourth Point",
+                  DL = "Deep Lagoon",
+                  SL = "Shallow Lagoon",
+                  RC = "Reef Crest",
+                  RF = "Reef Flat")
+
+#its2_levels <- sort(unique(as.character(t$data$its2_type_profile)))
+
+#its2_levels
+
+my_its2_cols <- c(
+  "C42a/C1/C42.2/C1b/C3-C1j-C1au-C115k" = "firebrick2",
+  "C42a/C42aw/C1-C42.2-C1b-C1j-C1au-C3" = "steelblue",
+  "C1/C42a/C42.2/C1b/C1j-C1au-C3-C115l" = "blue",
+  "C42a/C1/C42.2/C1b/C1j-C1ci-C1au-C3"  = "turquoise1",
+  "C42a/C42.2/C1-C1au-C1b-C3-C115k"     = "royalblue3",
+  "C42dh/C1-C42.2-C1b-C42dz"            = "darkslategray4",
+  "C15/C93a"                            = "deepskyblue2"
+)
+
+t<-plot_bar(GP1_S22, fill="its2_type_profile")+ geom_bar(stat="identity", width = 0.9)
+
+t_plot<-t  + facet_grid(~origin, scales = "free", space = "free", labeller = labeller(origin=Origin_names)) + ylab("Relative Abundance (%)") + theme(strip.text.x = element_text(size = 5, face="bold"))+
+  theme_classic() +
+  scale_fill_manual(values = my_its2_cols,breaks = names(my_its2_cols), name = "ITS2 Type Profile", drop = TRUE)+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5, size = 16), axis.title.y = element_text(size = 16), axis.title.x = element_text(size = 16, face = "bold"), axis.text.y = element_text(size=16),legend.title = element_text(size = 16, face = "bold"), strip.text = element_text(size = 16, face = "bold"),  legend.text = element_text(size = 12)); t_plot
+
+rel_abund_data<-t$data
+
+
+```
+
+```{r}
+
+library(tidyverse)
+library(scales)
+
+# read files
+abund <- read.delim("ITS2/20251021T032609_martyma1/post_med_seqs/638_20251021T051401_DBV_20251021T231108.seqs.relative.abund_only.txt",
+                    check.names = FALSE)
+meta  <- read.delim("ITS2/20251021T032609_martyma1/post_med_seqs/638_20251021T051401_DBV_20251021T231108.seqs.relative.meta_only.txt",
+                    check.names = FALSE)
+
+# join metadata to abundance table
+its2 <- left_join(meta, abund, by = "sample_uid")
+
+# keep Pocillopora damicornis Sept 2022 samples
+# here Sept 2022 is represented by collection_date == 20220901 in the metadata
+its2_s22 <- its2 %>%
+  filter(host_genus == "pocillopora",
+         host_species == "damicornis",
+         collection_date == 20220901)
+
+# remove samples you said to exclude
+its2_s22 <- its2_s22 %>%
+  filter(!sample_name %in% c("DL06", "FP04"))
+
+# identify the sequence columns
+seq_cols <- setdiff(colnames(abund), "sample_uid")
+
+# pivot longer
+its2_long <- its2_s22 %>%
+  select(sample_uid, sample_name, collection_date, collection_depth, all_of(seq_cols)) %>%
+  pivot_longer(cols = all_of(seq_cols),
+               names_to = "ITS2_type",
+               values_to = "RelAbund")
+
+# make site column from sample name prefix
+its2_long <- its2_long %>%
+  mutate(Origin = str_extract(sample_name, "^[A-Z]+"))
+
+# collapse anything <5% within each sample into Other
+its2_plot <- its2_long %>%
+  mutate(ITS2_plot = if_else(RelAbund < 0.05, "Other", ITS2_type)) %>%
+  group_by(sample_name, Origin, ITS2_plot) %>%
+  dplyr::summarise(RelAbund = sum(RelAbund), .groups = "drop")
+
+tax_order <- its2_plot %>%
+  group_by(ITS2_plot) %>%
+  dplyr::summarise(total = sum(RelAbund), .groups = "drop") %>%
+  dplyr::arrange(desc(total)) %>%
+  pull(ITS2_plot)
+
+tax_order <- c(setdiff(tax_order, "Other"), "Other")
+
+its2_plot <- its2_plot %>%
+  mutate(
+    Origin = factor(Origin, levels = c("HB", "FP", "DL", "SL", "RC", "RF")),
+    ITS2_plot = factor(ITS2_plot, levels = tax_order)
+  )
+
+# palette with Other as gray
+taxa_levels <- levels(its2_plot$ITS2_plot)
+blue_taxa <- setdiff(taxa_levels, "Other")
+blue_cols <- colorRampPalette(c("#c6dbef", "#6baed6", "#2171b5", "#08306b"))(length(blue_taxa))
+pal <- setNames(c(blue_cols, "gray70"), c(blue_taxa, "Other"))
+pal <- pal[taxa_levels]
+
+# override specific sequence colors
+pal[grepl("C3", names(pal))]  <- "deeppink"
+pal[grepl("C15", names(pal))] <- "darkorange"
+pal[grepl("C42aw", names(pal))] <- "springgreen4"
+pal[grepl("C115k", names(pal))] <- "yellow2"
+pal[grepl("C42dh", names(pal))] <- "springgreen4"
+pal[grepl("C1hr", names(pal))] <- "magenta4"
+pal[grepl("19017_C", names(pal))] <- "brown"
+pal[grepl("52544_C", names(pal))] <- "darkolivegreen"
+pal[grepl("C1fi", names(pal))] <- "sienna3"
+
+
+# plot
+Fig4 <- ggplot(its2_plot, aes(x = sample_name, y = RelAbund, fill = ITS2_plot)) +
+  geom_col(width = 0.85) +
+  facet_grid(~Origin, scales = "free_x", space = "free_x") +
+   scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = c(0, 0)
+  )  +
+  scale_fill_manual(values = pal, name = "ITS2 sequence") +
+  labs(x = expression(bold("Sample")),
+     y = expression(bold("Relative abundance")))+
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 16), axis.title.y = element_text(size = 16), axis.title.x = element_text(size = 16), axis.text.y = element_text(size=16),legend.title = element_text(size = 16, face = "bold"), strip.text = element_text(size = 16, face = "bold"), legend.text = element_text(size = 12))
+
+Fig4
+
+
+
+```
+
+
+```{r}
+library(patchwork)
+
+Fig4_combined <- (
+  (Fig4 + 
+     labs(x = NULL) + 
+     theme(
+       axis.text.x = element_blank(),
+       axis.ticks.x = element_blank()
+     )) /
+  (t_plot + 
+     labs(y = NULL) + 
+     theme(
+       axis.title.y = element_blank(),
+       strip.text = element_blank()
+     )) +
+  plot_layout(heights = c(5, 1.2), guides = "collect")
+) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.tag = element_text(size = 20, face = "bold"),
+      plot.tag.position = c(0, 1)
+    )
+  ) &
+  theme(legend.position = "right")
+
+Fig4_combined <- Fig4_combined & theme(
+  plot.tag = element_text(size = 18, face = "bold")
+)
+
+Fig4_combined
+```
+
+```{r}
+
+ggsave("FIG4_V2_combined.pdf",
+       plot = Fig4_combined,
+       width = 16,       # try 10–14 inches depending on how many columns
+       height = 8,       # adjust height accordingly
+       dpi = 600,        # high resolution for publication
+       units = "in")     # use inches for precise control
+
+
+
+```
+
+
+
+```{r}
+
+its2_sept22 <- subset_samples(GP1_rare_profile, timepoint == "Sept_2022")
+
+
+ord_sept22 <- ordinate(GP1_S22, method = "NMDS", distance = "bray")
+
+p_nmds <- plot_ordination(its2_sept22, ord_sept22, color = "origin") +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_classic() +
+  ggtitle("NMDS - Sept 2022")
+
+p_nmds
+
+```
+
+PERMANOVA
+```{r}
+library(pairwiseAdonis)
+
+
+metadata_s22 <- as(sample_data(GP1_S22), "data.frame")
+
+perm2<-adonis2(phyloseq::distance(GP1_S22, method="bray") ~ origin,
+       data = metadata_s22)
+
+perm2
+
+dist_sept22 <- phyloseq::distance(GP1_S22, method = "bray")
+
+# Now run pairwise
+pairwise_results <- pairwise.adonis(
+  dist_sept22,
+  factors = metadata_s22$origin,
+  p.adjust.m = "bonferroni"
+)
+
+pairwise_results
+
+
+```
+
+
+Calculate the average percent abundance for each taxa in each origin  
+```{r}
+means <- rel_abund_data %>%
+  group_by(its2_type_profile, origin) %>%
+  # Add abundances within each profile and origin
+  summarize_at("Abundance", mean)%>%
+  spread(its2_type_profile, Abundance);means
+```
+
+
+```{r}
+library(broom)
+
+aov_results <- rel_abund_data %>%
+  group_by(its2_type_profile) %>%
+  do(tidy(aov(Abundance ~ origin, data = .)))
+
+aov_results
+```
+
+
